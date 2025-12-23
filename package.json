@@ -4,7 +4,8 @@
   "description": "TypeScript scripts for Polymarket trading",
   "type": "module",
   "scripts": {
-    "getMarkets": "tsx src/scripts/getMarkets.ts"
+    "getMarkets": "tsx src/scripts/getMarkets.ts",
+    "getEvent": "tsx src/scripts/getEvent.ts"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
