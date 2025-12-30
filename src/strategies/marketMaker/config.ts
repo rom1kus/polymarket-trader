@@ -67,36 +67,33 @@ export function createMarketMakerConfig(
  * 3. Check the market's tick size and whether it's negRisk
  */
 export const MARKET_CONFIG: MarketParams = {
-  // Token ID for the outcome to trade (e.g., "Yes" token)
-  // Get this from: npm run getEvent -- <event-slug>
-  tokenId: "YOUR_TOKEN_ID_HERE",
+  // Trump/Netanyahu Event - "ISIS" market
+  // Will Trump say "ISIS" during the Netanyahu meeting on Dec 29, 2025?
+  tokenId: "7571086539767038280082354847097805299113400214070193326451269217051324225887",
 
-  // Tick size - minimum price increment
-  // Common values: "0.01" (1 cent), "0.001" (0.1 cent)
+  // Tick size - minimum price increment (from Gamma API)
   tickSize: "0.01",
 
-  // Whether this is a negative risk market
-  // Multi-outcome events (like "Who will win?") are typically negRisk: true
-  // Simple Yes/No markets are typically negRisk: false
+  // Not a negative risk market (independent Yes/No)
   negRisk: false,
 
-  // Minimum order size in shares
-  minOrderSize: 5,
+  // Minimum order size for rewards eligibility (from rewardsMinSize)
+  minOrderSize: 20,
 
-  // Maximum spread from midpoint for reward eligibility (in cents)
-  // Most markets use 3 cents, but check the order book on Polymarket
-  maxSpread: 3,
+  // Maximum spread from midpoint for reward eligibility (from rewardsMaxSpread)
+  maxSpread: 4.5,
 };
 
 /**
- * Strategy parameter overrides (optional).
- * Uncomment and modify to override defaults.
+ * Strategy parameter overrides.
  */
 export const STRATEGY_OVERRIDES: Partial<Omit<MarketMakerConfig, "market">> = {
-  // orderSize: 20,           // Place 20 shares per side
-  // spreadPercent: 0.3,      // Quote at 30% of max spread (tighter, more rewards)
-  // refreshIntervalMs: 60_000, // Refresh every 60 seconds
-  // rebalanceThreshold: 0.01,  // Rebalance if midpoint moves 1 cent
+  // 25 shares per side (above 20 minimum for rewards)
+  orderSize: 25,
+  // Quote at 50% of max spread (2.25c from midpoint)
+  spreadPercent: 0.5,
+  // Refresh every 30 seconds
+  refreshIntervalMs: 30_000,
 };
 
 /**

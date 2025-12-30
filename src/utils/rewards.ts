@@ -1,0 +1,300 @@
+/**
+ * Reward calculation utilities for Polymarket liquidity rewards.
+ *
+ * Polymarket uses a quadratic scoring formula to incentivize tighter spreads:
+ * S(v,s) = ((v-s)/v)² × size
+ *
+ * Where:
+ * - v = max spread from midpoint (in cents)
+ * - s = order's spread from midpoint (in cents)
+ * - size = order size in shares
+ *
+ * Orders closer to the midpoint earn exponentially more rewards.
+ */
+
+import type { ClobClient } from "@polymarket/clob-client";
+import type {
+  OpenOrder,
+  MarketRewardParamsWithMidpoint,
+  OrderRewardStatus,
+  RewardCheckResult,
+} from "@/types/rewards.js";
+import { fetchMarketRewardParams } from "@/utils/gamma.js";
+import { getMidpoint } from "@/utils/orders.js";
+
+/**
+ * Calculates the reward score for an order using Polymarket's quadratic formula.
+ *
+ * @param spreadCents - Spread from midpoint in cents
+ * @param maxSpreadCents - Maximum spread for rewards in cents (from rewardsMaxSpread)
+ * @param size - Order size in shares
+ * @returns Reward score (0 if outside max spread, higher is better)
+ *
+ * @example
+ * // Order 1 cent from midpoint, max spread 3 cents, size 100
+ * calculateRewardScore(1, 3, 100); // Returns ~44.44
+ *
+ * @example
+ * // Order exactly at max spread earns nothing
+ * calculateRewardScore(3, 3, 100); // Returns 0
+ */
+export function calculateRewardScore(
+  spreadCents: number,
+  maxSpreadCents: number,
+  size: number
+): number {
+  // Orders at or beyond max spread earn no rewards
+  if (spreadCents >= maxSpreadCents) {
+    return 0;
+  }
+
+  // Quadratic formula: ((v-s)/v)² × size
+  const ratio = (maxSpreadCents - spreadCents) / maxSpreadCents;
+  return ratio * ratio * size;
+}
+
+/**
+ * Calculates the spread from midpoint in cents.
+ *
+ * @param price - Order price (0-1)
+ * @param midpoint - Market midpoint (0-1)
+ * @returns Spread in cents (absolute value)
+ *
+ * @example
+ * calculateSpreadCents(0.48, 0.50); // Returns 2 (cents)
+ */
+export function calculateSpreadCents(price: number, midpoint: number): number {
+  return Math.abs(price - midpoint) * 100;
+}
+
+/**
+ * Determines if two-sided liquidity is required for reward eligibility.
+ *
+ * Per Polymarket docs, two-sided liquidity is required when the midpoint
+ * is outside the [0.10, 0.90] range.
+ *
+ * @param midpoint - Current market midpoint (0-1)
+ * @returns True if two-sided liquidity is required
+ */
+export function isTwoSidedRequired(midpoint: number): boolean {
+  return midpoint < 0.1 || midpoint > 0.9;
+}
+
+/**
+ * Calculates effective score considering single-sided penalty.
+ *
+ * From Polymarket docs:
+ * - If midpoint in [0.10, 0.90]: Qmin = max(min(Qone, Qtwo), max(Qone/c, Qtwo/c))
+ * - If midpoint outside: Qmin = min(Qone, Qtwo)
+ *
+ * @param buyScore - Total score from buy orders
+ * @param sellScore - Total score from sell orders
+ * @param midpoint - Market midpoint (0-1)
+ * @param scalingFactor - Penalty factor for single-sided (default 3.0)
+ * @returns Effective score after two-sided consideration
+ */
+export function calculateEffectiveScore(
+  buyScore: number,
+  sellScore: number,
+  midpoint: number,
+  scalingFactor: number = 3.0
+): number {
+  if (isTwoSidedRequired(midpoint)) {
+    // Strict two-sided requirement
+    return Math.min(buyScore, sellScore);
+  }
+
+  // Single-sided allowed with penalty
+  return Math.max(
+    Math.min(buyScore, sellScore),
+    Math.max(buyScore / scalingFactor, sellScore / scalingFactor)
+  );
+}
+
+/**
+ * Default scaling factor for single-sided liquidity penalty.
+ */
+export const DEFAULT_SCALING_FACTOR = 3.0;
+
+/**
+ * Fetches reward parameters for a market including current midpoint.
+ *
+ * Combines Gamma API reward params with CLOB midpoint data.
+ *
+ * @param client - Authenticated CLOB client
+ * @param tokenId - Token ID for the market
+ * @returns Market reward parameters with midpoint
+ */
+export async function getMarketRewardParamsWithMidpoint(
+  client: ClobClient,
+  tokenId: string
+): Promise<MarketRewardParamsWithMidpoint> {
+  const [gammaParams, midpoint] = await Promise.all([
+    fetchMarketRewardParams(tokenId),
+    getMidpoint(client, tokenId),
+  ]);
+
+  return {
+    ...gammaParams,
+    midpoint,
+  };
+}
+
+/**
+ * Evaluates reward eligibility for a single order.
+ *
+ * @param order - The open order to evaluate
+ * @param params - Market reward parameters
+ * @returns Order reward status
+ */
+export function evaluateOrderReward(
+  order: OpenOrder,
+  params: MarketRewardParamsWithMidpoint
+): OrderRewardStatus {
+  const price = parseFloat(order.price);
+  const size = parseFloat(order.original_size) - parseFloat(order.size_matched);
+  const spreadFromMid = calculateSpreadCents(price, params.midpoint);
+
+  let eligible = true;
+  let reason: string | undefined;
+
+  // Check minimum size
+  if (size < params.rewardsMinSize) {
+    eligible = false;
+    reason = `Size ${size} < min ${params.rewardsMinSize}`;
+  }
+
+  // Check max spread
+  if (spreadFromMid > params.rewardsMaxSpread) {
+    eligible = false;
+    reason = `Spread ${spreadFromMid.toFixed(2)}c > max ${params.rewardsMaxSpread}c`;
+  }
+
+  const score = eligible
+    ? calculateRewardScore(spreadFromMid, params.rewardsMaxSpread, size)
+    : 0;
+
+  return {
+    orderId: order.id,
+    side: order.side,
+    price,
+    size,
+    spreadFromMid,
+    score,
+    eligible,
+    reason,
+  };
+}
+
+/**
+ * Checks reward eligibility for a group of orders on the same token.
+ *
+ * @param orders - Array of open orders for a single token
+ * @param params - Market reward parameters with midpoint
+ * @param scalingFactor - Single-sided penalty factor (default 3.0)
+ * @returns Complete reward check result
+ */
+export function checkOrdersRewardEligibility(
+  orders: OpenOrder[],
+  params: MarketRewardParamsWithMidpoint,
+  scalingFactor: number = DEFAULT_SCALING_FACTOR
+): RewardCheckResult {
+  const orderStatuses: OrderRewardStatus[] = [];
+  let totalBuyScore = 0;
+  let totalSellScore = 0;
+  let hasBuySide = false;
+  let hasSellSide = false;
+
+  for (const order of orders) {
+    const status = evaluateOrderReward(order, params);
+    orderStatuses.push(status);
+
+    if (order.side === "BUY") {
+      totalBuyScore += status.score;
+      if (status.eligible) hasBuySide = true;
+    } else {
+      totalSellScore += status.score;
+      if (status.eligible) hasSellSide = true;
+    }
+  }
+
+  const twoSidedRequired = isTwoSidedRequired(params.midpoint);
+  const effectiveScore = calculateEffectiveScore(
+    totalBuyScore,
+    totalSellScore,
+    params.midpoint,
+    scalingFactor
+  );
+  const eligible = effectiveScore > 0;
+
+  // Build summary
+  let summary: string;
+  if (!eligible) {
+    if (twoSidedRequired && (!hasBuySide || !hasSellSide)) {
+      summary = `NOT ELIGIBLE: Two-sided required (midpoint ${(params.midpoint * 100).toFixed(1)}c), but missing ${!hasBuySide ? "BUY" : "SELL"} side`;
+    } else if (orderStatuses.every((o) => !o.eligible)) {
+      summary = `NOT ELIGIBLE: All orders outside reward parameters`;
+    } else {
+      summary = `NOT ELIGIBLE: Unknown reason`;
+    }
+  } else {
+    const singleSidedPenalty =
+      !hasBuySide || !hasSellSide
+        ? ` (single-sided, score reduced by ${scalingFactor}x)`
+        : "";
+    summary = `ELIGIBLE: Effective score = ${effectiveScore.toFixed(2)}${singleSidedPenalty}`;
+  }
+
+  return {
+    market: params,
+    orders: orderStatuses,
+    twoSidedRequired,
+    hasBuySide,
+    hasSellSide,
+    totalBuyScore,
+    totalSellScore,
+    effectiveScore,
+    scalingFactor,
+    eligible,
+    summary,
+  };
+}
+
+/**
+ * Checks reward eligibility for all open orders.
+ *
+ * Groups orders by token and evaluates each group.
+ *
+ * @param client - Authenticated CLOB client
+ * @param orders - Array of all open orders
+ * @param tokenId - Optional filter for specific token
+ * @returns Array of reward check results (one per token)
+ */
+export async function checkAllOrdersRewardEligibility(
+  client: ClobClient,
+  orders: OpenOrder[],
+  tokenId?: string
+): Promise<RewardCheckResult[]> {
+  // Group orders by token ID
+  const ordersByToken = new Map<string, OpenOrder[]>();
+  for (const order of orders) {
+    const tid = order.asset_id;
+    if (tokenId && tid !== tokenId) continue;
+
+    if (!ordersByToken.has(tid)) {
+      ordersByToken.set(tid, []);
+    }
+    ordersByToken.get(tid)!.push(order);
+  }
+
+  const results: RewardCheckResult[] = [];
+
+  // Process each token's orders
+  for (const [tid, tokenOrders] of ordersByToken) {
+    const params = await getMarketRewardParamsWithMidpoint(client, tid);
+    const result = checkOrdersRewardEligibility(tokenOrders, params);
+    results.push(result);
+  }
+
+  return results;
+}

@@ -1,10 +1,21 @@
 import type { Market } from "@/types/polymarket.js";
+import type { OrderBookData } from "@/types/polymarket.js";
 import type { GammaEvent, ParsedGammaMarket } from "@/types/gamma.js";
+import type { RewardCheckResult } from "@/types/rewards.js";
+import {
+  getYesOutcome,
+  getYesProbability,
+  getMarketTitle,
+  sortMarketsByProbability,
+} from "@/utils/markets.js";
 
 /**
  * Formats a number as currency (USD).
+ *
+ * @param value - Number to format
+ * @returns Formatted currency string (e.g., "$1.23M", "$45.67K", "$123.45")
  */
-function formatCurrency(value: number): string {
+export function formatCurrency(value: number): string {
   if (value >= 1_000_000) {
     return `$${(value / 1_000_000).toFixed(2)}M`;
   }
@@ -16,8 +27,11 @@ function formatCurrency(value: number): string {
 
 /**
  * Formats a price as a percentage.
+ *
+ * @param price - Price value (0-1)
+ * @returns Formatted percentage string (e.g., "45.0%")
  */
-function formatPercent(price: number): string {
+export function formatPercent(price: number): string {
   return `${(price * 100).toFixed(1)}%`;
 }
 
@@ -154,12 +168,11 @@ export function formatGammaMarket(
   const lines: string[] = [];
 
   // Get the primary outcome (usually "Yes" for this team to win)
-  const yesOutcome = market.parsedOutcomes.find((o) => o.outcome === "Yes");
+  const yesOutcome = getYesOutcome(market);
   const price = yesOutcome?.price ?? 0;
-  const tokenId = yesOutcome?.tokenId ?? "";
 
   // Title line with rank and probability
-  const title = market.groupItemTitle || market.question;
+  const title = getMarketTitle(market);
   const probability = formatPercent(price);
   lines.push(`  [${String(index + 1).padStart(2, " ")}] ${title}`);
   lines.push(`       Probability: ${probability} | Volume: ${formatCurrency(market.volumeNum)}`);
@@ -212,19 +225,12 @@ export function formatMarketsSummaryTable(markets: ParsedGammaMarket[]): string 
   lines.push("  " + "-".repeat(65));
 
   // Sort by probability (highest first)
-  const sorted = [...markets].sort((a, b) => {
-    const aPrice =
-      a.parsedOutcomes.find((o) => o.outcome === "Yes")?.price ?? 0;
-    const bPrice =
-      b.parsedOutcomes.find((o) => o.outcome === "Yes")?.price ?? 0;
-    return bPrice - aPrice;
-  });
+  const sorted = sortMarketsByProbability(markets);
 
   for (let i = 0; i < sorted.length; i++) {
     const market = sorted[i];
-    const yesOutcome = market.parsedOutcomes.find((o) => o.outcome === "Yes");
-    const price = yesOutcome?.price ?? 0;
-    const title = (market.groupItemTitle || market.question).substring(0, 23);
+    const price = getYesProbability(market);
+    const title = getMarketTitle(market).substring(0, 23);
 
     const status = market.active
       ? market.acceptingOrders
@@ -261,18 +267,145 @@ export function formatMarketsDetailed(markets: ParsedGammaMarket[]): string {
   lines.push(`${"─".repeat(70)}`);
 
   // Sort by probability (highest first)
-  const sorted = [...markets].sort((a, b) => {
-    const aPrice =
-      a.parsedOutcomes.find((o) => o.outcome === "Yes")?.price ?? 0;
-    const bPrice =
-      b.parsedOutcomes.find((o) => o.outcome === "Yes")?.price ?? 0;
-    return bPrice - aPrice;
-  });
+  const sorted = sortMarketsByProbability(markets);
 
   for (let i = 0; i < sorted.length; i++) {
     lines.push(formatGammaMarket(sorted[i], i));
     lines.push("");
   }
+
+  return lines.join("\n");
+}
+
+/**
+ * Formats order book data as a table.
+ *
+ * Shows CLOB order book data with Gamma price as fallback.
+ * Displays a note if CLOB data is unavailable (negative risk markets).
+ *
+ * @param data - Array of order book data
+ * @returns Formatted table string
+ */
+export function formatOrderBookTable(data: OrderBookData[]): string {
+  const lines: string[] = [];
+
+  // Check if any CLOB data is available (valid non-null, non-empty values)
+  const hasClobData = data.some(
+    (item) =>
+      (item.bestBid && item.bestBid !== "0" && !isNaN(parseFloat(item.bestBid))) ||
+      (item.bestAsk && item.bestAsk !== "0" && !isNaN(parseFloat(item.bestAsk))) ||
+      (item.midpoint && item.midpoint !== "0" && !isNaN(parseFloat(item.midpoint)))
+  );
+
+  lines.push(`\n${"─".repeat(78)}`);
+  lines.push("  PRICING DATA");
+  lines.push(`${"─".repeat(78)}`);
+
+  if (!hasClobData) {
+    lines.push("");
+    lines.push(
+      "  Note: CLOB order book unavailable for this event (negative risk market)."
+    );
+    lines.push("  Showing prices from Gamma API instead.");
+  }
+
+  lines.push("");
+  lines.push(
+    "  " +
+      "Outcome".padEnd(22) +
+      "Price".padEnd(10) +
+      "Best Bid".padEnd(12) +
+      "Best Ask".padEnd(12) +
+      "Midpoint".padEnd(12) +
+      "Spread"
+  );
+  lines.push("  " + "-".repeat(73));
+
+  for (const item of data) {
+    const title = item.title.substring(0, 20);
+    const gammaPrice = `${(item.gammaPrice * 100).toFixed(1)}%`;
+    const bid =
+      item.bestBid && !isNaN(parseFloat(item.bestBid))
+        ? `$${parseFloat(item.bestBid).toFixed(3)}`
+        : "-";
+    const ask =
+      item.bestAsk && !isNaN(parseFloat(item.bestAsk))
+        ? `$${parseFloat(item.bestAsk).toFixed(3)}`
+        : "-";
+    const mid =
+      item.midpoint && !isNaN(parseFloat(item.midpoint))
+        ? `$${parseFloat(item.midpoint).toFixed(3)}`
+        : "-";
+    const spread =
+      item.spread && !isNaN(parseFloat(item.spread))
+        ? `$${parseFloat(item.spread).toFixed(3)}`
+        : "-";
+
+    lines.push(
+      "  " +
+        title.padEnd(22) +
+        gammaPrice.padEnd(10) +
+        bid.padEnd(12) +
+        ask.padEnd(12) +
+        mid.padEnd(12) +
+        spread
+    );
+  }
+
+  lines.push("");
+
+  return lines.join("\n");
+}
+
+/**
+ * Formats reward check results for console output.
+ *
+ * @param results - Array of reward check results
+ * @returns Formatted multi-line string
+ */
+export function formatRewardResults(results: RewardCheckResult[]): string {
+  if (results.length === 0) {
+    return "";
+  }
+
+  const lines: string[] = [];
+
+  for (const result of results) {
+    lines.push("\n" + "=".repeat(70));
+    lines.push(`MARKET: ${result.market.tokenId.substring(0, 20)}...`);
+    lines.push("=".repeat(70));
+    lines.push(`  Midpoint: ${(result.market.midpoint * 100).toFixed(2)}¢`);
+    lines.push(`  Min Size for Rewards: ${result.market.rewardsMinSize} shares`);
+    lines.push(`  Max Spread for Rewards: ${result.market.rewardsMaxSpread}¢`);
+    lines.push(`  Two-Sided Required: ${result.twoSidedRequired ? "YES" : "NO"}`);
+
+    lines.push("\n  ORDERS:");
+    lines.push("  " + "-".repeat(66));
+
+    for (const order of result.orders) {
+      const status = order.eligible ? "✓" : "✗";
+      const scoreStr = order.score > 0 ? `Score: ${order.score.toFixed(2)}` : order.reason || "";
+      lines.push(
+        `  ${status} ${order.side.padEnd(4)} ${order.size.toFixed(2).padStart(8)} @ ${order.price.toFixed(4)} | Spread: ${order.spreadFromMid.toFixed(2)}¢ | ${scoreStr}`
+      );
+    }
+
+    lines.push("\n  SUMMARY:");
+    lines.push("  " + "-".repeat(66));
+    lines.push(`  BUY Score:  ${result.totalBuyScore.toFixed(2)}`);
+    lines.push(`  SELL Score: ${result.totalSellScore.toFixed(2)}`);
+
+    if (!result.twoSidedRequired && (!result.hasBuySide || !result.hasSellSide)) {
+      lines.push(
+        `  Single-sided penalty: /${result.scalingFactor} (midpoint ${(result.market.midpoint * 100).toFixed(1)}¢ allows single-sided)`
+      );
+    }
+
+    lines.push(`  Effective Score: ${result.effectiveScore.toFixed(2)}`);
+    lines.push(`\n  >>> ${result.summary}`);
+  }
+
+  lines.push("\n" + "=".repeat(70));
 
   return lines.join("\n");
 }

@@ -137,3 +137,16 @@ export interface ParsedGammaMarket extends GammaMarket {
 export interface ParsedGammaEvent extends Omit<GammaEvent, "markets"> {
   markets: ParsedGammaMarket[];
 }
+
+/**
+ * Reward parameters for a market from Gamma API.
+ * Used to determine reward eligibility for orders.
+ */
+export interface MarketRewardParams {
+  /** Token ID for the market */
+  tokenId: string;
+  /** Minimum order size for reward eligibility (in shares) */
+  rewardsMinSize: number;
+  /** Maximum spread from midpoint for rewards (in cents) */
+  rewardsMaxSpread: number;
+}

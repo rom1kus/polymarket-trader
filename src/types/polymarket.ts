@@ -28,3 +28,24 @@ export interface Market {
 export interface MarketsResponse extends Omit<PaginationPayload, "data"> {
   data: Market[];
 }
+
+/**
+ * Order book pricing data for a market.
+ * Combines CLOB order book data with Gamma API fallback prices.
+ */
+export interface OrderBookData {
+  /** Condition ID for the market */
+  conditionId: string;
+  /** Market title (groupItemTitle or question) */
+  title: string;
+  /** Best bid price from CLOB (null if unavailable) */
+  bestBid: string | null;
+  /** Best ask price from CLOB (null if unavailable) */
+  bestAsk: string | null;
+  /** Midpoint price from CLOB (null if unavailable) */
+  midpoint: string | null;
+  /** Spread from CLOB (null if unavailable) */
+  spread: string | null;
+  /** Fallback price from Gamma API (always available) */
+  gammaPrice: number;
+}

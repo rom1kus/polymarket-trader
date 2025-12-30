@@ -12,6 +12,7 @@ import type {
   ParsedGammaEvent,
   ParsedGammaMarket,
   ParsedOutcome,
+  MarketRewardParams,
 } from "@/types/gamma.js";
 
 /**
@@ -98,6 +99,7 @@ export function parseGammaMarket(market: GammaMarket): ParsedGammaMarket {
  * Fetches an event by its slug from the Gamma API.
  *
  * @param slug - The event slug (e.g., "uefa-champions-league-winner")
+ * @param fetcher - Optional fetch function for testing (defaults to global fetch)
  * @returns The event data with associated markets
  * @throws Error if the event is not found or request fails
  *
@@ -106,10 +108,13 @@ export function parseGammaMarket(market: GammaMarket): ParsedGammaMarket {
  * console.log(event.title); // "UEFA Champions League Winner"
  * console.log(event.markets.length); // 31 (one per team)
  */
-export async function fetchEventBySlug(slug: string): Promise<GammaEvent> {
+export async function fetchEventBySlug(
+  slug: string,
+  fetcher: typeof fetch = fetch
+): Promise<GammaEvent> {
   const url = `${config.gammaHost}/events/slug/${encodeURIComponent(slug)}`;
 
-  const response = await fetch(url);
+  const response = await fetcher(url);
 
   if (!response.ok) {
     if (response.status === 404) {
@@ -139,5 +144,56 @@ export async function fetchEventWithParsedMarkets(
   return {
     ...event,
     markets: event.markets.map(parseGammaMarket),
+  };
+}
+
+/**
+ * Raw market data from Gamma API when fetching by token ID.
+ * Contains reward parameters.
+ */
+interface GammaMarketResponse {
+  rewardsMinSize?: number;
+  rewardsMaxSpread?: number;
+}
+
+/**
+ * Fetches reward parameters for a market from the Gamma API.
+ *
+ * @param tokenId - CLOB token ID for the market
+ * @param fetcher - Optional fetch function for testing (defaults to global fetch)
+ * @returns Market reward parameters
+ * @throws Error if the market is not found
+ *
+ * @example
+ * const params = await fetchMarketRewardParams(tokenId);
+ * console.log(`Min size: ${params.rewardsMinSize}`);
+ * console.log(`Max spread: ${params.rewardsMaxSpread}c`);
+ */
+export async function fetchMarketRewardParams(
+  tokenId: string,
+  fetcher: typeof fetch = fetch
+): Promise<MarketRewardParams> {
+  const url = `${config.gammaHost}/markets?clob_token_ids=${encodeURIComponent(tokenId)}`;
+
+  const response = await fetcher(url);
+
+  if (!response.ok) {
+    throw new Error(
+      `Failed to fetch market reward params: ${response.status} ${response.statusText}`
+    );
+  }
+
+  const markets = (await response.json()) as GammaMarketResponse[];
+
+  if (!markets || markets.length === 0) {
+    throw new Error(`Market not found for token ${tokenId}`);
+  }
+
+  const market = markets[0];
+
+  return {
+    tokenId,
+    rewardsMinSize: market.rewardsMinSize ?? 0,
+    rewardsMaxSpread: market.rewardsMaxSpread ?? 0,
   };
 }

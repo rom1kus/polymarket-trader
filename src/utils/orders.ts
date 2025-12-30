@@ -8,6 +8,49 @@ import { ClobClient, Side, OrderType } from "@polymarket/clob-client";
 import type { TickSize } from "@polymarket/clob-client";
 
 /**
+ * Response from getMidpoint API - can be a string or an object with mid property.
+ */
+type MidpointResponse = string | { mid: string } | null;
+
+/**
+ * Parses the midpoint response from the CLOB API.
+ *
+ * The API can return either a string or an object with a `mid` property.
+ *
+ * @param response - Raw response from getMidpoint()
+ * @returns Parsed midpoint as a number
+ */
+export function parseMidpointResponse(response: MidpointResponse): number {
+  if (response === null) {
+    return 0;
+  }
+  if (typeof response === "object" && "mid" in response) {
+    return parseFloat(response.mid);
+  }
+  return parseFloat(String(response));
+}
+
+/**
+ * Fetches the current midpoint for a token.
+ *
+ * @param client - ClobClient instance
+ * @param tokenId - Token ID to get midpoint for
+ * @returns Current midpoint price (0-1)
+ *
+ * @example
+ * const client = createClobClient();
+ * const midpoint = await getMidpoint(client, tokenId);
+ * console.log(`Midpoint: ${midpoint}`); // e.g., 0.55
+ */
+export async function getMidpoint(
+  client: ClobClient,
+  tokenId: string
+): Promise<number> {
+  const response = await client.getMidpoint(tokenId);
+  return parseMidpointResponse(response as MidpointResponse);
+}
+
+/**
  * Parameters for placing a limit order
  */
 export interface OrderParams {

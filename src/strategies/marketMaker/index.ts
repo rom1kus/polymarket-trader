@@ -16,45 +16,14 @@
  *   - Cancels and replaces orders when midpoint moves significantly
  */
 
-import { ClobClient, Side } from "@polymarket/clob-client";
+import { Side } from "@polymarket/clob-client";
 import { createAuthenticatedClobClient } from "@/utils/authClient.js";
-import { placeOrder, cancelOrdersForToken } from "@/utils/orders.js";
+import { placeOrder, cancelOrdersForToken, getMidpoint } from "@/utils/orders.js";
+import { sleep, log } from "@/utils/helpers.js";
 import { generateQuotes, shouldRebalance, formatQuote, estimateRewardScore } from "./quoter.js";
 import { CONFIG } from "./config.js";
+import type { ClobClient } from "@polymarket/clob-client";
 import type { MarketMakerConfig, ActiveQuotes, MarketMakerState } from "./types.js";
-
-/**
- * Sleep for a given number of milliseconds.
- */
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * Formats a timestamp for logging.
- */
-function timestamp(): string {
-  return new Date().toISOString().replace("T", " ").substring(0, 19);
-}
-
-/**
- * Logs a message with timestamp.
- */
-function log(message: string): void {
-  console.log(`[${timestamp()}] ${message}`);
-}
-
-/**
- * Fetches the current midpoint for a token.
- */
-async function getMidpoint(client: ClobClient, tokenId: string): Promise<number> {
-  const response = await client.getMidpoint(tokenId);
-  // API returns { mid: string } object
-  const midValue = typeof response === "object" && response !== null && "mid" in response
-    ? (response as { mid: string }).mid
-    : String(response);
-  return parseFloat(midValue);
-}
 
 /**
  * Validates the configuration before starting.

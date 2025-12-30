@@ -16,7 +16,7 @@ polymarket-trader/
 ├── src/
 │   ├── config/           # Application configuration
 │   │   └── index.ts      # CLOB and Gamma API hosts, chain settings
-│   ├── scripts/          # Executable utility scripts
+│   ├── scripts/          # Executable utility scripts (thin orchestration only)
 │   │   ├── getMarkets.ts # Fetches and displays all Polymarket markets
 │   │   ├── getEvent.ts   # Fetches detailed event data by slug/URL
 │   │   └── checkRewards.ts # Checks if open orders are earning rewards
@@ -29,6 +29,7 @@ polymarket-trader/
 │   ├── types/            # Shared TypeScript type definitions
 │   │   ├── polymarket.ts # Custom types for CLOB API responses
 │   │   ├── gamma.ts      # Types for Gamma API (events, markets metadata)
+│   │   ├── rewards.ts    # Types for reward eligibility checking
 │   │   └── strategy.ts   # Shared strategy types (MarketParams, etc.)
 │   └── utils/            # Shared utility modules
 │       ├── authClient.ts # Authenticated ClobClient factory (for trading)
@@ -36,7 +37,11 @@ polymarket-trader/
 │       ├── env.ts        # Environment variable management
 │       ├── formatters.ts # Output formatting utilities
 │       ├── gamma.ts      # Gamma API utilities (fetch events, parse markets)
-│       └── orders.ts     # Order placement and management utilities
+│       ├── helpers.ts    # Common utilities (sleep, logging)
+│       ├── markets.ts    # Market data utilities (sorting, outcome helpers)
+│       ├── orderbook.ts  # Order book fetching utilities
+│       ├── orders.ts     # Order placement and management utilities
+│       └── rewards.ts    # Reward calculation and eligibility checking
 ├── .env                  # Environment variables (not committed)
 ├── .env.example          # Example environment template
 ├── package.json          # Project configuration
@@ -61,6 +66,7 @@ Shared TypeScript type definitions. Types are organized by source:
 Custom types for Polymarket CLOB API responses not exported by `@polymarket/clob-client`:
 - `Market` - Market data structure from CLOB API
 - `MarketsResponse` - Paginated markets response (extends `PaginationPayload`)
+- `OrderBookData` - Order book pricing data combining CLOB and Gamma prices
 
 #### `src/types/gamma.ts`
 Types for Polymarket Gamma API responses (event and market metadata):
@@ -70,6 +76,14 @@ Types for Polymarket Gamma API responses (event and market metadata):
 - `ParsedGammaMarket` - Market with parsed outcome data ready for display
 - `ParsedGammaEvent` - Event with parsed market data
 - `ParsedOutcome` - Parsed outcome with price and token ID for trading
+- `MarketRewardParams` - Reward parameters from Gamma API
+
+#### `src/types/rewards.ts`
+Types for reward eligibility checking:
+- `OpenOrder` - Open order from CLOB API
+- `MarketRewardParamsWithMidpoint` - Reward params with current midpoint
+- `OrderRewardStatus` - Reward status for a single order
+- `RewardCheckResult` - Complete reward check result for a market
 
 #### `src/types/strategy.ts`
 Shared types for trading strategies:
@@ -86,16 +100,22 @@ Environment variable management module providing:
 
 #### `src/utils/client.ts`
 Read-only ClobClient factory:
-- `createClobClient()` - Creates unauthenticated client for reading market data
+- `ClobClientOptions` - Configuration interface (host, chain)
+- `createClobClient(options?)` - Creates unauthenticated client for reading market data
+- Supports optional parameters for testing/different environments
 
 #### `src/utils/authClient.ts`
 Authenticated ClobClient factory for trading:
-- `createAuthenticatedClobClient()` - Creates fully authenticated client with Gnosis Safe signature type
+- `SIGNATURE_TYPE` - Enum for Polymarket signature types (EOA, POLY_PROXY, POLY_GNOSIS_SAFE)
+- `AuthClientConfig` - Configuration interface for authentication
+- `createAuthenticatedClobClient(config?)` - Creates fully authenticated client
 - Automatically derives API credentials on first use
-- Uses `POLYMARKET_PROXY_ADDRESS` for the funder address
+- Supports optional parameters for testing/different environments
 
 #### `src/utils/orders.ts`
 Order placement and management utilities:
+- `getMidpoint(client, tokenId)` - Fetches current midpoint with response parsing
+- `parseMidpointResponse(response)` - Normalizes midpoint API response
 - `placeOrder(client, params)` - Places a GTC limit order
 - `cancelAllOrders(client)` - Cancels all open orders
 - `cancelOrdersForToken(client, tokenId)` - Cancels orders for a specific token
@@ -107,21 +127,60 @@ Gamma API utilities for fetching event and market metadata:
 - `extractSlug(input)` - Extracts slug from URL or returns raw slug
 - `parseMarketOutcomes(market)` - Parses outcome prices and token IDs
 - `parseGammaMarket(market)` - Enhances market with parsed outcomes
-- `fetchEventBySlug(slug)` - Fetches event data from Gamma API
+- `fetchEventBySlug(slug, fetcher?)` - Fetches event data from Gamma API
 - `fetchEventWithParsedMarkets(slugOrUrl)` - Fetches and parses event with all markets
+- `fetchMarketRewardParams(tokenId, fetcher?)` - Fetches reward params for a token
+
+#### `src/utils/markets.ts`
+Market data utilities:
+- `getYesOutcome(market)` - Gets the "Yes" outcome from a parsed market
+- `getNoOutcome(market)` - Gets the "No" outcome from a parsed market
+- `getYesProbability(market)` - Gets Yes probability (0-1)
+- `sortMarketsByProbability(markets)` - Sorts markets by Yes probability
+- `getMarketTitle(market)` - Gets market title (groupItemTitle or question)
+
+#### `src/utils/orderbook.ts`
+Order book fetching utilities:
+- `FetchOrderBookOptions` - Options for batch fetching (batchSize, onProgress)
+- `fetchOrderBookForMarket(client, market)` - Fetches order book for single market
+- `fetchOrderBookData(client, markets, options?)` - Batch fetches order book data
+- `sortOrderBookByProbability(data, markets)` - Sorts order book by probability
+
+#### `src/utils/rewards.ts`
+Reward calculation and eligibility checking:
+- `calculateRewardScore(spread, maxSpread, size)` - Calculates quadratic reward score
+- `calculateSpreadCents(price, midpoint)` - Calculates spread in cents
+- `isTwoSidedRequired(midpoint)` - Checks if two-sided liquidity is required
+- `calculateEffectiveScore(buyScore, sellScore, midpoint)` - Calculates effective score
+- `getMarketRewardParamsWithMidpoint(client, tokenId)` - Fetches params with midpoint
+- `evaluateOrderReward(order, params)` - Evaluates single order reward status
+- `checkOrdersRewardEligibility(orders, params)` - Checks orders for a token
+- `checkAllOrdersRewardEligibility(client, orders)` - Checks all open orders
 
 #### `src/utils/formatters.ts`
 Output formatting utilities:
+- `formatCurrency(value)` - Formats number as USD currency
+- `formatPercent(price)` - Formats price as percentage
 - `formatMarket(market, index)` - Formats a CLOB Market for console output
 - `formatEventHeader(event)` - Formats Gamma event overview
 - `formatGammaMarket(market, index)` - Formats a Gamma market with parsed data
 - `formatMarketsSummaryTable(markets)` - Summary table sorted by probability
 - `formatMarketsDetailed(markets)` - Detailed market data with token IDs
+- `formatOrderBookTable(data)` - Formats order book pricing table
+- `formatRewardResults(results)` - Formats reward check results
+
+#### `src/utils/helpers.ts`
+Common helper utilities:
+- `sleep(ms)` - Async sleep function
+- `formatTimestamp(date?)` - Formats timestamp for logging
+- `createLogger(prefix?)` - Creates a prefixed logger function
+- `log(message)` - Simple timestamped logger
 
 ### `src/scripts/`
 Directory for executable utility scripts. Each script should:
 - Import utilities from `@/utils/*` using path aliases
 - Handle errors gracefully with proper exit codes
+- Be thin orchestration only (no business logic)
 - Log meaningful output for debugging
 
 #### `src/scripts/getMarkets.ts`
@@ -142,10 +201,8 @@ Fetches detailed event data by slug or URL:
 #### `src/scripts/checkRewards.ts`
 Checks if open orders are eligible for liquidity rewards:
 - Fetches all open orders for the authenticated wallet
-- Gets market reward parameters (maxSpread, minSize) from Gamma API
-- Calculates reward score for each order using the Polymarket formula
-- Checks two-sided requirement based on midpoint position
-- Shows effective score with single-sided penalty if applicable
+- Uses shared reward utilities for eligibility checking
+- Displays formatted results with scores and eligibility status
 
 ### `src/strategies/`
 Directory for automated trading strategies. Each strategy should:
@@ -166,7 +223,7 @@ Market maker bot for earning Polymarket liquidity rewards:
 - `index.ts` - Main entry point and runner loop
 - `config.ts` - Strategy configuration (edit this to set your market!)
 - `types.ts` - Strategy-specific types (MarketMakerConfig, ActiveQuotes, etc.)
-- `quoter.ts` - Quote generation logic using the reward formula
+- `quoter.ts` - Quote generation logic using shared reward utilities
 
 **Reward Formula:**
 Orders are scored using: `S(v,s) = ((v-s)/v)² × size`
@@ -210,6 +267,7 @@ Central Limit Order Book API for trading operations:
 Metadata API for events and markets:
 - Event data (title, description, volume, liquidity)
 - Associated markets (outcomes)
+- Reward parameters (minSize, maxSpread)
 - Categories and tags
 
 ## Dependencies
@@ -217,11 +275,29 @@ Metadata API for events and markets:
 ### Production
 - `dotenv` - Environment variable loading
 - `@polymarket/clob-client` - Official Polymarket CLOB API client
+- Includes `@ethersproject/wallet` as transitive dependency for wallet signing
 
 ### Development
 - `typescript` - TypeScript compiler
 - `tsx` - TypeScript execution
 - `@types/node` - Node.js type definitions
 
+## Design Principles
+
+### Testability
+- All utility functions accept optional parameters with production defaults
+- API fetch functions accept optional `fetcher` parameter for mocking
+- Client factories accept optional configuration for testing
+
+### DRY (Don't Repeat Yourself)
+- Common calculations extracted to shared utilities (e.g., reward scoring)
+- Market data helpers prevent duplicate outcome finding logic
+- Formatters centralized for consistent output
+
+### Thin Scripts
+- Scripts only orchestrate utilities, no business logic
+- All types defined in `src/types/`
+- All utilities in `src/utils/`
+
 ---
-*Last updated: Added checkRewards script for verifying liquidity reward eligibility*
+*Last updated: Refactored for DRY, testability, and added new utility modules*

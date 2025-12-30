@@ -2,12 +2,11 @@
  * Quote generation logic for market making.
  *
  * Generates bid and ask quotes around the current midpoint to earn liquidity rewards.
- * The reward formula is quadratic: S(v,s) = ((v-s)/v)² × size
- * - Closer to midpoint = exponentially more rewards
- * - Two-sided liquidity is required for midpoints < 0.10 or > 0.90
+ * Uses the reward utilities for score calculations.
  */
 
 import type { MarketMakerConfig, Quotes, QuoteLevel } from "./types.js";
+import { calculateRewardScore, calculateSpreadCents } from "@/utils/rewards.js";
 
 /**
  * Rounds a price to the nearest tick size.
@@ -103,19 +102,8 @@ export function shouldRebalance(
 }
 
 /**
- * Calculates the spread from midpoint in cents.
- *
- * @param price - Order price
- * @param midpoint - Market midpoint
- * @returns Spread in cents
- */
-export function calculateSpreadCents(price: number, midpoint: number): number {
-  return Math.abs(price - midpoint) * 100;
-}
-
-/**
  * Estimates the reward score for a quote.
- * Uses the Polymarket formula: S(v,s) = ((v-s)/v)² × size
+ * Uses the shared reward calculation from @/utils/rewards.
  *
  * @param quote - The quote level
  * @param midpoint - Market midpoint
@@ -128,15 +116,7 @@ export function estimateRewardScore(
   maxSpreadCents: number
 ): number {
   const spreadCents = calculateSpreadCents(quote.price, midpoint);
-
-  // If spread is beyond max, no rewards
-  if (spreadCents >= maxSpreadCents) {
-    return 0;
-  }
-
-  // Quadratic formula: ((v-s)/v)² × size
-  const ratio = (maxSpreadCents - spreadCents) / maxSpreadCents;
-  return ratio * ratio * quote.size;
+  return calculateRewardScore(spreadCents, maxSpreadCents, quote.size);
 }
 
 /**
