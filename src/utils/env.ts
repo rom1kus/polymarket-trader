@@ -30,6 +30,10 @@ export function getEnvOptional(key: string, defaultValue: string = ""): string {
  * Environment configuration for the application
  */
 export const env = {
+  /** Public key for the funder wallet */
   FUNDER_PUBLIC_KEY: getEnvRequired("FUNDER_PUBLIC_KEY"),
+  /** Private key for the funder wallet (signer) */
   FUNDER_PRIVATE_KEY: getEnvRequired("FUNDER_PRIVATE_KEY"),
+  /** Polymarket proxy wallet address (Gnosis Safe) - shown below profile picture on Polymarket */
+  POLYMARKET_PROXY_ADDRESS: getEnvRequired("POLYMARKET_PROXY_ADDRESS"),
 } as const;

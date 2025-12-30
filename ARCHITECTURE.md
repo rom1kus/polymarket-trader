@@ -1,7 +1,7 @@
 # Polymarket Trader - Architecture
 
 ## Overview
-TypeScript-based trading scripts for Polymarket. This project provides utilities and scripts for interacting with the Polymarket platform.
+TypeScript-based trading bot for Polymarket. This project provides utilities, scripts, and automated trading strategies for interacting with the Polymarket platform.
 
 ## Tech Stack
 - **Runtime**: Node.js with ESM modules
@@ -16,20 +16,31 @@ polymarket-trader/
 ├── src/
 │   ├── config/           # Application configuration
 │   │   └── index.ts      # CLOB and Gamma API hosts, chain settings
-│   ├── scripts/          # Executable trading scripts
+│   ├── scripts/          # Executable utility scripts
 │   │   ├── getMarkets.ts # Fetches and displays all Polymarket markets
-│   │   └── getEvent.ts   # Fetches detailed event data by slug/URL
+│   │   ├── getEvent.ts   # Fetches detailed event data by slug/URL
+│   │   └── checkRewards.ts # Checks if open orders are earning rewards
+│   ├── strategies/       # Automated trading strategies
+│   │   └── marketMaker/  # Market maker bot for liquidity rewards
+│   │       ├── index.ts  # Main entry point and runner loop
+│   │       ├── config.ts # Strategy configuration (edit this!)
+│   │       ├── types.ts  # Strategy-specific types
+│   │       └── quoter.ts # Quote generation logic
 │   ├── types/            # Shared TypeScript type definitions
 │   │   ├── polymarket.ts # Custom types for CLOB API responses
-│   │   └── gamma.ts      # Types for Gamma API (events, markets metadata)
+│   │   ├── gamma.ts      # Types for Gamma API (events, markets metadata)
+│   │   └── strategy.ts   # Shared strategy types (MarketParams, etc.)
 │   └── utils/            # Shared utility modules
-│       ├── client.ts     # ClobClient factory
+│       ├── authClient.ts # Authenticated ClobClient factory (for trading)
+│       ├── client.ts     # Read-only ClobClient factory
 │       ├── env.ts        # Environment variable management
 │       ├── formatters.ts # Output formatting utilities
-│       └── gamma.ts      # Gamma API utilities (fetch events, parse markets)
+│       ├── gamma.ts      # Gamma API utilities (fetch events, parse markets)
+│       └── orders.ts     # Order placement and management utilities
 ├── .env                  # Environment variables (not committed)
 ├── .env.example          # Example environment template
 ├── package.json          # Project configuration
+├── TODO.md               # Future enhancements roadmap
 └── tsconfig.json         # TypeScript configuration
 ```
 
@@ -43,7 +54,7 @@ Application configuration constants:
 
 ### `src/types/`
 Shared TypeScript type definitions. Types are organized by source:
-- **Library types**: Import directly from `@polymarket/clob-client` (e.g., `Token`, `Chain`, `PaginationPayload`)
+- **Library types**: Import directly from `@polymarket/clob-client` (e.g., `Token`, `Chain`, `TickSize`)
 - **Custom types**: Defined in `src/types/` when not exported by the library
 
 #### `src/types/polymarket.ts`
@@ -60,17 +71,38 @@ Types for Polymarket Gamma API responses (event and market metadata):
 - `ParsedGammaEvent` - Event with parsed market data
 - `ParsedOutcome` - Parsed outcome with price and token ID for trading
 
-### `src/utils/env.ts`
+#### `src/types/strategy.ts`
+Shared types for trading strategies:
+- `StrategyConfig` - Base configuration for any strategy
+- `MarketParams` - Market parameters required for trading (tokenId, tickSize, negRisk, etc.)
+
+### `src/utils/`
+
+#### `src/utils/env.ts`
 Environment variable management module providing:
 - `getEnvRequired(key)` - Get required env var or throw
 - `getEnvOptional(key, default)` - Get optional env var with fallback
 - `env` object - Typed environment configuration
 
-### `src/utils/client.ts`
-ClobClient factory module:
-- `createClobClient()` - Creates a configured ClobClient instance using settings from `src/config`
+#### `src/utils/client.ts`
+Read-only ClobClient factory:
+- `createClobClient()` - Creates unauthenticated client for reading market data
 
-### `src/utils/gamma.ts`
+#### `src/utils/authClient.ts`
+Authenticated ClobClient factory for trading:
+- `createAuthenticatedClobClient()` - Creates fully authenticated client with Gnosis Safe signature type
+- Automatically derives API credentials on first use
+- Uses `POLYMARKET_PROXY_ADDRESS` for the funder address
+
+#### `src/utils/orders.ts`
+Order placement and management utilities:
+- `placeOrder(client, params)` - Places a GTC limit order
+- `cancelAllOrders(client)` - Cancels all open orders
+- `cancelOrdersForToken(client, tokenId)` - Cancels orders for a specific token
+- `cancelOrder(client, orderId)` - Cancels a specific order
+- `getOpenOrders(client, tokenId?)` - Gets open orders
+
+#### `src/utils/gamma.ts`
 Gamma API utilities for fetching event and market metadata:
 - `extractSlug(input)` - Extracts slug from URL or returns raw slug
 - `parseMarketOutcomes(market)` - Parses outcome prices and token IDs
@@ -78,7 +110,7 @@ Gamma API utilities for fetching event and market metadata:
 - `fetchEventBySlug(slug)` - Fetches event data from Gamma API
 - `fetchEventWithParsedMarkets(slugOrUrl)` - Fetches and parses event with all markets
 
-### `src/utils/formatters.ts`
+#### `src/utils/formatters.ts`
 Output formatting utilities:
 - `formatMarket(market, index)` - Formats a CLOB Market for console output
 - `formatEventHeader(event)` - Formats Gamma event overview
@@ -87,7 +119,7 @@ Output formatting utilities:
 - `formatMarketsDetailed(markets)` - Detailed market data with token IDs
 
 ### `src/scripts/`
-Directory for executable trading scripts. Each script should:
+Directory for executable utility scripts. Each script should:
 - Import utilities from `@/utils/*` using path aliases
 - Handle errors gracefully with proper exit codes
 - Log meaningful output for debugging
@@ -107,12 +139,48 @@ Fetches detailed event data by slug or URL:
 - Fetches order book data (bid/ask/spread) from CLOB API
 - Displays condition IDs and token IDs needed for trading
 
+#### `src/scripts/checkRewards.ts`
+Checks if open orders are eligible for liquidity rewards:
+- Fetches all open orders for the authenticated wallet
+- Gets market reward parameters (maxSpread, minSize) from Gamma API
+- Calculates reward score for each order using the Polymarket formula
+- Checks two-sided requirement based on midpoint position
+- Shows effective score with single-sided penalty if applicable
+
+### `src/strategies/`
+Directory for automated trading strategies. Each strategy should:
+- Have its own subdirectory with `index.ts`, `config.ts`, `types.ts`
+- Use shared utilities from `@/utils/*`
+- Have configurable parameters in `config.ts`
+
+#### `src/strategies/marketMaker/`
+Market maker bot for earning Polymarket liquidity rewards:
+
+**How it works:**
+1. Fetches current midpoint from CLOB API
+2. Places bid and ask orders within the reward-eligible spread
+3. Periodically refreshes quotes to stay near the midpoint
+4. Cancels and replaces orders when midpoint moves significantly
+
+**Files:**
+- `index.ts` - Main entry point and runner loop
+- `config.ts` - Strategy configuration (edit this to set your market!)
+- `types.ts` - Strategy-specific types (MarketMakerConfig, ActiveQuotes, etc.)
+- `quoter.ts` - Quote generation logic using the reward formula
+
+**Reward Formula:**
+Orders are scored using: `S(v,s) = ((v-s)/v)² × size`
+- `v` = max spread from midpoint (in cents)
+- `s` = your order's spread from midpoint
+- Orders closer to midpoint earn exponentially more rewards
+
 ## Environment Variables
 
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `FUNDER_PUBLIC_KEY` | Yes | Public key for the funder wallet |
-| `FUNDER_PRIVATE_KEY` | Yes | Private key for the funder wallet |
+| `FUNDER_PRIVATE_KEY` | Yes | Private key for the funder wallet (signer) |
+| `POLYMARKET_PROXY_ADDRESS` | Yes | Polymarket proxy wallet address (Gnosis Safe) |
 
 ## Path Aliases
 The project uses TypeScript path aliases:
@@ -120,9 +188,14 @@ The project uses TypeScript path aliases:
 
 ## Running Scripts
 ```bash
+# Utility scripts
 npm run getMarkets                                    # Fetch and display all markets
 npm run getEvent -- uefa-champions-league-winner      # Fetch event by slug
 npm run getEvent -- https://polymarket.com/event/...  # Fetch event by URL
+npm run checkRewards                                  # Check if orders are earning rewards
+
+# Trading strategies
+npm run marketMaker                                   # Run market maker bot (configure first!)
 ```
 
 ## APIs Used
@@ -151,4 +224,4 @@ Metadata API for events and markets:
 - `@types/node` - Node.js type definitions
 
 ---
-*Last updated: Added Gamma API integration, getEvent script, and event/market types*
+*Last updated: Added checkRewards script for verifying liquidity reward eligibility*
