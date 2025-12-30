@@ -1,4 +1,7 @@
-# TODO - Future Enhancements
+# Market Maker Strategy - Roadmap
+
+> **Note:** This roadmap is specific to the **Market Maker strategy** (`src/strategies/marketMaker/`).
+> For strategy documentation, see [market-maker.md](./market-maker.md).
 
 Organized by **Impact** and **Effort**. Priority items directly prevent losses or enable profitability.
 

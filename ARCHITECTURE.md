@@ -15,7 +15,8 @@ TypeScript-based trading bot for Polymarket. This project provides utilities, sc
 polymarket-trader/
 ├── docs/
 │   └── strategies/
-│       └── market-maker.md  # Market maker strategy documentation
+│       ├── market-maker.md         # Market maker strategy documentation
+│       └── market-maker-roadmap.md # Market maker future enhancements
 ├── src/
 │   ├── config/           # Application configuration
 │   │   └── index.ts      # CLOB and Gamma API hosts, chain settings
@@ -30,12 +31,15 @@ polymarket-trader/
 │   │       ├── types.ts  # Strategy-specific types
 │   │       └── quoter.ts # Quote generation logic
 │   ├── types/            # Shared TypeScript type definitions
-│   │   ├── polymarket.ts # Custom types for CLOB API responses
+│   │   ├── balance.ts    # Balance and allowance types
 │   │   ├── gamma.ts      # Types for Gamma API (events, markets metadata)
+│   │   ├── polymarket.ts # Custom types for CLOB API responses
+│   │   ├── positions.ts  # Position tracking types
 │   │   ├── rewards.ts    # Types for reward eligibility checking
 │   │   └── strategy.ts   # Shared strategy types (MarketParams, etc.)
 │   └── utils/            # Shared utility modules
 │       ├── authClient.ts # Authenticated ClobClient factory (for trading)
+│       ├── balance.ts    # USDC and token balance utilities
 │       ├── client.ts     # Read-only ClobClient factory
 │       ├── env.ts        # Environment variable management
 │       ├── formatters.ts # Output formatting utilities
@@ -44,11 +48,11 @@ polymarket-trader/
 │       ├── markets.ts    # Market data utilities (sorting, outcome helpers)
 │       ├── orderbook.ts  # Order book fetching utilities
 │       ├── orders.ts     # Order placement and management utilities
+│       ├── positions.ts  # Position tracking utilities
 │       └── rewards.ts    # Reward calculation and eligibility checking
 ├── .env                  # Environment variables (not committed)
 ├── .env.example          # Example environment template
 ├── package.json          # Project configuration
-├── TODO.md               # Future enhancements roadmap
 └── tsconfig.json         # TypeScript configuration
 ```
 
@@ -93,6 +97,18 @@ Shared types for trading strategies:
 - `StrategyConfig` - Base configuration for any strategy
 - `MarketParams` - Market parameters required for trading (tokenId, tickSize, negRisk, etc.)
 
+#### `src/types/balance.ts`
+Types for wallet balance tracking:
+- `BalanceInfo` - Extended balance with parsed numeric values
+- `WalletBalances` - Complete wallet balances (USDC + conditional tokens)
+- `TokenBalanceSummary` - Summary of token balance for display
+
+#### `src/types/positions.ts`
+Types for position tracking:
+- `Position` - Position in a single token (size, hasPosition)
+- `MarketPosition` - Complete position for a binary market (YES + NO + net exposure)
+- `PositionsSummary` - Summary of all positions across multiple markets
+
 ### `src/utils/`
 
 #### `src/utils/env.ts`
@@ -114,6 +130,24 @@ Authenticated ClobClient factory for trading:
 - `createAuthenticatedClobClient(config?)` - Creates fully authenticated client
 - Automatically derives API credentials on first use
 - Supports optional parameters for testing/different environments
+
+#### `src/utils/balance.ts`
+USDC and conditional token balance utilities:
+- `getUsdcBalance(client)` - Gets USDC (collateral) balance
+- `getTokenBalance(client, tokenId)` - Gets balance for a specific token
+- `getBalances(client, tokenIds)` - Gets USDC and multiple token balances
+- `summarizeTokenBalances(balances)` - Creates summary for display
+- `hasSufficientUsdc(client, amount)` - Checks if USDC balance is sufficient
+- `hasSufficientTokens(client, tokenId, amount)` - Checks if token balance is sufficient
+
+#### `src/utils/positions.ts`
+Position tracking utilities:
+- `getPosition(client, tokenId)` - Gets position for a single token
+- `getPositions(client, tokenIds)` - Gets positions for multiple tokens
+- `getMarketPosition(client, yesTokenId, noTokenId)` - Gets complete binary market position
+- `getPositionsSummary(client, tokenIds)` - Gets summary with active position count
+- `hasAnyPosition(client, tokenIds)` - Checks if any position exists
+- `hasMinimumPosition(client, tokenId, minSize)` - Checks if position meets minimum
 
 #### `src/utils/orders.ts`
 Order placement and management utilities:
@@ -293,4 +327,4 @@ Metadata API for events and markets:
 - All utilities in `src/utils/`
 
 ---
-*Last updated: Refactored for DRY, testability, and added new utility modules*
+*Last updated: Added balance and position tracking utilities*
