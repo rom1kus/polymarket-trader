@@ -13,6 +13,9 @@ TypeScript-based trading bot for Polymarket. This project provides utilities, sc
 
 ```
 polymarket-trader/
+├── docs/
+│   └── strategies/
+│       └── market-maker.md  # Market maker strategy documentation
 ├── src/
 │   ├── config/           # Application configuration
 │   │   └── index.ts      # CLOB and Gamma API hosts, chain settings
@@ -211,25 +214,15 @@ Directory for automated trading strategies. Each strategy should:
 - Have configurable parameters in `config.ts`
 
 #### `src/strategies/marketMaker/`
-Market maker bot for earning Polymarket liquidity rewards:
+Market maker bot for earning Polymarket liquidity rewards.
 
-**How it works:**
-1. Fetches current midpoint from CLOB API
-2. Places bid and ask orders within the reward-eligible spread
-3. Periodically refreshes quotes to stay near the midpoint
-4. Cancels and replaces orders when midpoint moves significantly
+> **Full documentation:** [docs/strategies/market-maker.md](docs/strategies/market-maker.md)
 
 **Files:**
 - `index.ts` - Main entry point and runner loop
 - `config.ts` - Strategy configuration (edit this to set your market!)
 - `types.ts` - Strategy-specific types (MarketMakerConfig, ActiveQuotes, etc.)
 - `quoter.ts` - Quote generation logic using shared reward utilities
-
-**Reward Formula:**
-Orders are scored using: `S(v,s) = ((v-s)/v)² × size`
-- `v` = max spread from midpoint (in cents)
-- `s` = your order's spread from midpoint
-- Orders closer to midpoint earn exponentially more rewards
 
 ## Environment Variables
 
