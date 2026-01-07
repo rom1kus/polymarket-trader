@@ -20,6 +20,7 @@
  */
 
 import { Side } from "@polymarket/clob-client";
+import { Wallet } from "@ethersproject/wallet";
 import { createAuthenticatedClobClient } from "@/utils/authClient.js";
 import { placeOrder, cancelOrdersForToken, getMidpoint } from "@/utils/orders.js";
 import { sleep, log } from "@/utils/helpers.js";
@@ -236,12 +237,14 @@ async function runMarketMaker(config: MarketMakerConfig): Promise<void> {
   // Initialize Safe for CTF operations
   log("Initializing Safe wallet for CTF operations...");
   const safeAddress = env.POLYMARKET_PROXY_ADDRESS;
+  const signerAddress = new Wallet(env.FUNDER_PRIVATE_KEY).address;
   const safe = await createSafeForCtf({
     signerPrivateKey: env.FUNDER_PRIVATE_KEY,
     safeAddress,
   });
   const provider = getPolygonProvider();
   log(`Safe initialized: ${safeAddress}`);
+  log(`Signer (gas payer): ${signerAddress}`);
 
   // =========================================================================
   // PRE-FLIGHT CHECKS
@@ -253,7 +256,7 @@ async function runMarketMaker(config: MarketMakerConfig): Promise<void> {
     config.market,
     config.orderSize,
     config.inventory,
-    safeAddress,
+    signerAddress,  // Use signer address for MATIC gas balance check
     provider
   );
 
@@ -369,7 +372,7 @@ async function runMarketMaker(config: MarketMakerConfig): Promise<void> {
           config.market,
           config.orderSize,
           config.inventory,
-          safeAddress,
+          signerAddress,  // Use signer address for MATIC gas balance check
           provider
         );
 

@@ -31,22 +31,23 @@ import type {
  *
  * @param client - Authenticated ClobClient for balance queries
  * @param market - Market parameters (token IDs)
- * @param walletAddress - Address to check MATIC balance for (Safe address)
+ * @param signerAddress - Address of the signer (funder) for MATIC gas balance check
  * @param provider - Polygon provider for MATIC balance
  * @returns Current inventory status
  */
 export async function getInventoryStatus(
   client: ClobClient,
   market: MarketParams,
-  walletAddress: string,
+  signerAddress: string,
   provider: JsonRpcProvider
 ): Promise<InventoryStatus> {
   // Fetch all balances in parallel
+  // Note: MATIC is checked on the signer (funder) address since they pay gas
   const [usdcInfo, yesInfo, noInfo, matic] = await Promise.all([
     getUsdcBalance(client),
     getTokenBalance(client, market.yesTokenId),
     getTokenBalance(client, market.noTokenId),
-    getMaticBalance(walletAddress, provider),
+    getMaticBalance(signerAddress, provider),
   ]);
 
   return {
@@ -131,7 +132,7 @@ export function analyzeDeficit(
  * Runs all pre-flight checks for the market maker.
  *
  * Checks:
- * 1. MATIC balance for gas
+ * 1. MATIC balance for gas (on signer address)
  * 2. Token balances vs requirements
  * 3. USDC available for split + buy orders
  *
@@ -139,7 +140,7 @@ export function analyzeDeficit(
  * @param market - Market parameters
  * @param orderSize - Size per order
  * @param inventory - Inventory configuration
- * @param safeAddress - Safe wallet address for balance checks
+ * @param signerAddress - Signer (funder) address for MATIC gas balance check
  * @param provider - Polygon provider
  * @returns Pre-flight result with status and any issues
  */
@@ -148,14 +149,14 @@ export async function runPreFlightChecks(
   market: MarketParams,
   orderSize: number,
   inventory: InventoryConfig,
-  safeAddress: string,
+  signerAddress: string,
   provider: JsonRpcProvider
 ): Promise<PreFlightResult> {
   const warnings: string[] = [];
   const errors: string[] = [];
 
-  // Get current status
-  const status = await getInventoryStatus(client, market, safeAddress, provider);
+  // Get current status (MATIC checked on signer, not Safe)
+  const status = await getInventoryStatus(client, market, signerAddress, provider);
 
   // Calculate requirements
   const requirements = calculateRequirements(orderSize, market, inventory);
@@ -233,7 +234,8 @@ export async function runPreFlightChecks(
  *
  * @param client - Authenticated ClobClient
  * @param safe - Initialized Safe instance for transaction execution
- * @param safeAddress - The Safe wallet address
+ * @param safeAddress - The Safe wallet address (for token operations)
+ * @param signerAddress - Signer (funder) address for MATIC gas balance check
  * @param provider - Polygon provider
  * @param market - Market parameters
  * @param orderSize - Size per order
@@ -246,19 +248,20 @@ export async function ensureSufficientInventory(
   client: ClobClient,
   safe: SafeInstance,
   safeAddress: string,
+  signerAddress: string,
   provider: JsonRpcProvider,
   market: MarketParams,
   orderSize: number,
   inventory: InventoryConfig,
   dryRun: boolean = false
 ): Promise<number> {
-  // Run checks
+  // Run checks (MATIC checked on signer address)
   const preflight = await runPreFlightChecks(
     client,
     market,
     orderSize,
     inventory,
-    safeAddress,
+    signerAddress,
     provider
   );
 
