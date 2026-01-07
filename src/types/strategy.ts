@@ -17,16 +17,28 @@ export interface StrategyConfig {
 }
 
 /**
- * Market parameters required for trading
+ * Market parameters required for trading and CTF operations.
+ *
+ * These parameters can be obtained using the `selectMarket` script:
+ * ```
+ * npm run selectMarket -- <event-slug-or-url>
+ * ```
  */
 export interface MarketParams {
-  /** Token ID for the outcome to trade (e.g., Yes token ID) */
-  tokenId: string;
+  /** YES token ID (first outcome) - for buy/sell YES */
+  yesTokenId: string;
+  /** NO token ID (second outcome) - for buy/sell NO */
+  noTokenId: string;
+  /**
+   * Condition ID for CTF operations (split/merge/redeem).
+   * This is the parent condition that both YES and NO tokens derive from.
+   */
+  conditionId: string;
   /** Minimum price increment for the market */
   tickSize: TickSize;
-  /** Whether this is a negative risk market */
+  /** Whether this is a negative risk market (multi-outcome) */
   negRisk: boolean;
-  /** Minimum order size in shares */
+  /** Minimum order size in shares (from rewardsMinSize) */
   minOrderSize: number;
   /** Maximum spread from midpoint for reward eligibility (in cents) */
   maxSpread: number;

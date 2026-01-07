@@ -6,15 +6,22 @@
  */
 
 import { ClobClient, AssetType } from "@polymarket/clob-client";
+import { formatUnits } from "@ethersproject/units";
 import type { BalanceInfo, WalletBalances, TokenBalanceSummary } from "@/types/balance.js";
 
+/** USDC and conditional tokens use 6 decimal places */
+const TOKEN_DECIMALS = 6;
+
 /**
- * Parses a balance/allowance string to a number.
- * USDC has 6 decimals, but the API returns values in USDC units (not wei).
+ * Parses a balance string from raw units to a human-readable number.
+ * Uses ethers formatUnits for reliable decimal conversion.
  */
-function parseBalanceString(value: string): number {
-  const parsed = parseFloat(value);
-  return isNaN(parsed) ? 0 : parsed;
+function parseBalance(value: string): number {
+  try {
+    return parseFloat(formatUnits(value, TOKEN_DECIMALS));
+  } catch {
+    return 0;
+  }
 }
 
 /**
@@ -36,8 +43,8 @@ export async function getUsdcBalance(client: ClobClient): Promise<BalanceInfo> {
   return {
     balance: response.balance,
     allowance: response.allowance,
-    balanceNumber: parseBalanceString(response.balance),
-    allowanceNumber: parseBalanceString(response.allowance),
+    balanceNumber: parseBalance(response.balance),
+    allowanceNumber: parseBalance(response.allowance),
   };
 }
 
@@ -65,8 +72,8 @@ export async function getTokenBalance(
   return {
     balance: response.balance,
     allowance: response.allowance,
-    balanceNumber: parseBalanceString(response.balance),
-    allowanceNumber: parseBalanceString(response.allowance),
+    balanceNumber: parseBalance(response.balance),
+    allowanceNumber: parseBalance(response.allowance),
   };
 }
 

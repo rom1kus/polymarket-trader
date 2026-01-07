@@ -8,6 +8,7 @@ TypeScript-based trading bot for Polymarket. This project provides utilities, sc
 - **Language**: TypeScript 5.7+
 - **Script Runner**: tsx
 - **Environment Management**: dotenv
+- **Safe SDK**: @safe-global/protocol-kit for Gnosis Safe transaction execution
 
 ## Project Structure
 
@@ -19,11 +20,14 @@ polymarket-trader/
 │       └── market-maker-roadmap.md # Market maker future enhancements
 ├── src/
 │   ├── config/           # Application configuration
-│   │   └── index.ts      # CLOB and Gamma API hosts, chain settings
+│   │   ├── index.ts      # CLOB and Gamma API hosts, chain settings
+│   │   └── contracts.ts  # Polygon contract addresses (CTF, USDC, NegRisk)
 │   ├── scripts/          # Executable utility scripts (thin orchestration only)
 │   │   ├── getMarkets.ts # Fetches and displays all Polymarket markets
 │   │   ├── getEvent.ts   # Fetches detailed event data by slug/URL
-│   │   └── checkRewards.ts # Checks if open orders are earning rewards
+│   │   ├── checkRewards.ts # Checks if open orders are earning rewards
+│   │   ├── selectMarket.ts # Generates market maker config from event slug
+│   │   └── findBestMarkets.ts # Finds highest-paying markets for liquidity rewards
 │   ├── strategies/       # Automated trading strategies
 │   │   └── marketMaker/  # Market maker bot for liquidity rewards
 │   │       ├── index.ts  # Main entry point and runner loop
@@ -33,6 +37,7 @@ polymarket-trader/
 │   ├── types/            # Shared TypeScript type definitions
 │   │   ├── balance.ts    # Balance and allowance types
 │   │   ├── gamma.ts      # Types for Gamma API (events, markets metadata)
+│   │   ├── inventory.ts  # Inventory management types (status, requirements, deficit)
 │   │   ├── polymarket.ts # Custom types for CLOB API responses
 │   │   ├── positions.ts  # Position tracking types
 │   │   ├── rewards.ts    # Types for reward eligibility checking
@@ -41,10 +46,13 @@ polymarket-trader/
 │       ├── authClient.ts # Authenticated ClobClient factory (for trading)
 │       ├── balance.ts    # USDC and token balance utilities
 │       ├── client.ts     # Read-only ClobClient factory
+│       ├── ctf.ts        # Conditional Token Framework operations (split/merge/approve via Safe)
+│       ├── safe.ts       # Safe (Gnosis Safe) SDK utilities for transaction execution
 │       ├── env.ts        # Environment variable management
 │       ├── formatters.ts # Output formatting utilities
 │       ├── gamma.ts      # Gamma API utilities (fetch events, parse markets)
 │       ├── helpers.ts    # Common utilities (sleep, logging)
+│       ├── inventory.ts  # Inventory management (status, requirements, pre-flight)
 │       ├── markets.ts    # Market data utilities (sorting, outcome helpers)
 │       ├── orderbook.ts  # Order book fetching utilities
 │       ├── orders.ts     # Order placement and management utilities
@@ -63,6 +71,14 @@ Application configuration constants:
 - `config.clobHost` - Production CLOB API URL (`https://clob.polymarket.com`)
 - `config.gammaHost` - Production Gamma API URL (`https://gamma-api.polymarket.com`)
 - `config.chain` - Polygon mainnet chain (`Chain.POLYGON`)
+
+### `src/config/contracts.ts`
+Polygon mainnet contract addresses and constants:
+- `CTF_ADDRESS` - Conditional Token Framework contract
+- `USDC_ADDRESS` - USDC stablecoin contract on Polygon
+- `NEG_RISK_CTF_ADDRESS` - Negative risk CTF adapter contract
+- `MIN_MATIC_BALANCE` - Minimum MATIC required for gas (`0.01`)
+- `DEFAULT_RPC_URL` - Fallback public Polygon RPC URL
 
 ### `src/types/`
 Shared TypeScript type definitions. Types are organized by source:
@@ -86,16 +102,28 @@ Types for Polymarket Gamma API responses (event and market metadata):
 - `MarketRewardParams` - Reward parameters from Gamma API
 
 #### `src/types/rewards.ts`
-Types for reward eligibility checking:
+Types for reward eligibility checking and market ranking:
 - `OpenOrder` - Open order from CLOB API
 - `MarketRewardParamsWithMidpoint` - Reward params with current midpoint
 - `OrderRewardStatus` - Reward status for a single order
 - `RewardCheckResult` - Complete reward check result for a market
+- `MarketWithRewards` - Market with reward parameters for ranking
+- `MarketAttractivenessScore` - Score breakdown for market attractiveness
+- `RankedMarket` - Market with calculated attractiveness score
 
 #### `src/types/strategy.ts`
 Shared types for trading strategies:
 - `StrategyConfig` - Base configuration for any strategy
-- `MarketParams` - Market parameters required for trading (tokenId, tickSize, negRisk, etc.)
+- `MarketParams` - Market parameters required for trading (yesTokenId, noTokenId, conditionId, tickSize, negRisk, etc.)
+
+#### `src/types/inventory.ts`
+Types for inventory management and pre-flight checks:
+- `InventoryStatus` - Current balances (USDC, YES tokens, NO tokens, MATIC)
+- `InventoryRequirements` - Required balances for two-sided market making
+- `InventoryDeficit` - Calculated deficit for auto-split
+- `PreFlightResult` - Result of pre-flight checks (ready, warnings, errors)
+- `InventoryConfig` - Configuration for inventory management
+- `CtfOperationResult` - Result of CTF operations (split/merge)
 
 #### `src/types/balance.ts`
 Types for wallet balance tracking:
@@ -116,6 +144,42 @@ Environment variable management module providing:
 - `getEnvRequired(key)` - Get required env var or throw
 - `getEnvOptional(key, default)` - Get optional env var with fallback
 - `env` object - Typed environment configuration
+
+#### `src/utils/safe.ts`
+Safe (Gnosis Safe) SDK utilities for executing transactions from the Safe account:
+- `getSafeInstance(config)` - Initializes and caches Safe Protocol Kit instance
+- `clearSafeCache()` - Clears the cached Safe instance
+- `executeSafeTransaction(safe, transaction)` - Executes a single transaction through Safe
+- `executeSafeBatchTransaction(safe, transactions)` - Executes multiple transactions atomically
+- `createSafeTransactionData(to, data, value?)` - Creates transaction data for Safe SDK
+
+**Why Safe?** Polymarket uses Gnosis Safe (proxy wallets) for trading. All CTF operations
+(split, merge, approve) must be executed from the Safe account, not directly from the
+private key. The Safe SDK enables proper transaction execution through the proxy wallet.
+
+#### `src/utils/ctf.ts`
+Conditional Token Framework (CTF) operations executed through Safe:
+- `getPolygonProvider()` - Gets provider from `POLYGON_RPC_URL` env var or fallback
+- `getMaticBalance(address)` - Gets MATIC balance for gas
+- `getUsdcAllowance(owner, spender)` - Gets current USDC allowance
+- `encodeUsdcApproval(spender, amount?)` - Encodes USDC approval calldata
+- `encodeSplitPosition(conditionId, amount)` - Encodes split position calldata
+- `encodeMergePositions(conditionId, amount)` - Encodes merge positions calldata
+- `approveUsdcForCtfFromSafe(safe)` - Approves USDC for CTF via Safe
+- `ensureUsdcApprovalFromSafe(safe, address, amount)` - Ensures approval if needed
+- `splitPositionFromSafe(safe, conditionId, amount)` - Splits USDC into YES+NO tokens via Safe
+- `mergePositionsFromSafe(safe, conditionId, amount)` - Merges tokens back to USDC via Safe
+- `approveAndSplitFromSafe(safe, address, conditionId, amount)` - Batched approve + split for efficiency
+- `createSafeForCtf(config)` - Creates Safe instance for CTF operations
+
+#### `src/utils/inventory.ts`
+Inventory management utilities (uses Safe for CTF operations):
+- `getInventoryStatus(client, market, address)` - Gets current USDC, YES, NO, MATIC balances
+- `calculateRequirements(config, market)` - Calculates required token balances
+- `analyzeDeficit(status, requirements)` - Determines if split is needed and how much
+- `runPreFlightChecks(status, requirements, config)` - Validates inventory before starting
+- `ensureSufficientInventory(client, safe, address, ...)` - Splits USDC via Safe if needed
+- `formatInventoryStatus(status)` - Formats inventory for display
 
 #### `src/utils/client.ts`
 Read-only ClobClient factory:
@@ -167,6 +231,7 @@ Gamma API utilities for fetching event and market metadata:
 - `fetchEventBySlug(slug, fetcher?)` - Fetches event data from Gamma API
 - `fetchEventWithParsedMarkets(slugOrUrl)` - Fetches and parses event with all markets
 - `fetchMarketRewardParams(tokenId, fetcher?)` - Fetches reward params for a token
+- `fetchMarketsWithRewards(options?, fetcher?)` - Fetches markets with reward programs for ranking
 
 #### `src/utils/markets.ts`
 Market data utilities:
@@ -241,6 +306,26 @@ Checks if open orders are eligible for liquidity rewards:
 - Uses shared reward utilities for eligibility checking
 - Displays formatted results with scores and eligibility status
 
+#### `src/scripts/selectMarket.ts`
+Generates market maker configuration from an event slug:
+- Accepts event slug or full URL
+- Fetches event data from Gamma API
+- Lists all valid binary markets with Yes/No outcomes
+- Outputs TypeScript configuration for `config.ts`
+- Usage: `npm run selectMarket -- <event-slug> [market-index]`
+
+#### `src/scripts/findBestMarkets.ts`
+Finds the highest-paying markets for liquidity rewards:
+- Fetches active markets with reward programs from Gamma API
+- Calculates attractiveness score based on:
+  - `rewardsMaxSpread` - Higher = more forgiving spread requirements
+  - `rewardsMinSize` - Lower = easier to participate
+  - `liquidityNum` - Higher = more stable market
+  - `competitive` - Lower = less competition
+- Ranks and displays top markets in a table
+- Supports `--json`, `--details`, `--limit`, `--min-liquidity` options
+- Usage: `npm run findBestMarkets` or `npm run findBestMarkets -- --details 1`
+
 ### `src/strategies/`
 Directory for automated trading strategies. Each strategy should:
 - Have its own subdirectory with `index.ts`, `config.ts`, `types.ts`
@@ -265,6 +350,7 @@ Market maker bot for earning Polymarket liquidity rewards.
 | `FUNDER_PUBLIC_KEY` | Yes | Public key for the funder wallet |
 | `FUNDER_PRIVATE_KEY` | Yes | Private key for the funder wallet (signer) |
 | `POLYMARKET_PROXY_ADDRESS` | Yes | Polymarket proxy wallet address (Gnosis Safe) |
+| `POLYGON_RPC_URL` | No | Custom Polygon RPC URL (defaults to public RPC) |
 
 ## Path Aliases
 The project uses TypeScript path aliases:
@@ -277,6 +363,10 @@ npm run getMarkets                                    # Fetch and display all ma
 npm run getEvent -- uefa-champions-league-winner      # Fetch event by slug
 npm run getEvent -- https://polymarket.com/event/...  # Fetch event by URL
 npm run checkRewards                                  # Check if orders are earning rewards
+npm run selectMarket -- <event-slug>                  # List markets in an event
+npm run selectMarket -- <event-slug> 0                # Generate config for market index 0
+npm run findBestMarkets                               # Find top reward markets
+npm run findBestMarkets -- --details 1                # Show details for top market
 
 # Trading strategies
 npm run marketMaker                                   # Run market maker bot (configure first!)
@@ -302,7 +392,13 @@ Metadata API for events and markets:
 ### Production
 - `dotenv` - Environment variable loading
 - `@polymarket/clob-client` - Official Polymarket CLOB API client
-- Includes `@ethersproject/wallet` as transitive dependency for wallet signing
+- `@safe-global/protocol-kit` - Safe (Gnosis Safe) SDK for transaction execution
+- `@safe-global/types-kit` - TypeScript types for Safe SDK
+- `ethers` (via @ethersproject/*) - Ethereum library for contract encoding
+  - `@ethersproject/abi` - ABI encoding for contract calls
+  - `@ethersproject/contracts` - Contract interaction for read operations
+  - `@ethersproject/providers` - Polygon RPC provider
+  - `@ethersproject/units` - Unit conversion (parseUnits, formatUnits)
 
 ### Development
 - `typescript` - TypeScript compiler
@@ -310,6 +406,21 @@ Metadata API for events and markets:
 - `@types/node` - Node.js type definitions
 
 ## Design Principles
+
+### Safe (Gnosis Safe) Transaction Execution
+Polymarket uses Gnosis Safe wallets (proxy wallets) for trading. The `POLYMARKET_PROXY_ADDRESS`
+environment variable is the Safe account address, and `FUNDER_PRIVATE_KEY` is the owner/signer.
+
+**Critical:** All on-chain CTF operations (split, merge, approve) MUST be executed through the
+Safe account, not directly from the private key. This ensures:
+- Transactions come from the correct wallet (the proxy address shown in Polymarket UI)
+- Token balances are correctly attributed to the trading account
+- Orders placed via CLOB API match the wallet holding the tokens
+
+The Safe SDK (`@safe-global/protocol-kit`) handles:
+1. Creating Safe transactions with proper encoding
+2. Signing with the owner's private key
+3. Executing transactions on-chain from the Safe account
 
 ### Testability
 - All utility functions accept optional parameters with production defaults
@@ -327,4 +438,4 @@ Metadata API for events and markets:
 - All utilities in `src/utils/`
 
 ---
-*Last updated: Added balance and position tracking utilities*
+*Last updated: Migrated CTF operations to Safe SDK for proper Gnosis Safe transaction execution*

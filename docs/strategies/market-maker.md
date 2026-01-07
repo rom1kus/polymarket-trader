@@ -9,10 +9,22 @@ The market maker strategy places simultaneous bid (buy) and ask (sell) orders at
 ## Quick Start
 
 ```bash
-# 1. Configure your market in src/strategies/marketMaker/config.ts
-# 2. Run the bot
+# 1. Find the best markets for liquidity rewards
+npm run findBestMarkets                   # Shows top 20 markets ranked by attractiveness
+npm run findBestMarkets -- --details 1    # Show details for the #1 ranked market
+
+# 2. Generate config from an event
+npm run selectMarket -- <event-slug>          # List available markets
+npm run selectMarket -- <event-slug> 0        # Generate config for market 0
+
+# 3. Copy the output to src/strategies/marketMaker/config.ts
+
+# 4. Run the bot (starts in dry-run mode by default)
 npm run marketMaker
-# 3. Press Ctrl+C to stop (gracefully cancels orders)
+
+# 5. When ready for live trading, set dryRun: false in config.ts
+
+# 6. Press Ctrl+C to stop (gracefully cancels orders)
 ```
 
 ## How It Works
@@ -20,49 +32,70 @@ npm run marketMaker
 ### High-Level Flow
 
 ```
-                            ┌─────────────────────────────────────────────────────────┐
-                            │                   MARKET MAKER LOOP                      │
-                            └─────────────────────────────────────────────────────────┘
-                                                      │
-                                                      ▼
-┌────────────────────┐    ┌────────────────────┐    ┌────────────────────┐
-│   INITIALIZATION   │───▶│  VALIDATE CONFIG   │───▶│  CREATE CLIENT     │
-│                    │    │  - Token ID set?   │    │  (authenticated)   │
-└────────────────────┘    │  - Size >= min?    │    └────────────────────┘
-                          │  - Spread valid?   │              │
-                          └────────────────────┘              │
-                                                              ▼
-                          ┌───────────────────────────────────────────────────────────┐
-                          │                     MAIN LOOP (while running)              │
-                          │  ┌─────────────────────────────────────────────────────┐  │
-                          │  │                                                     │  │
-                          │  │  ┌──────────────┐     ┌──────────────────────────┐  │  │
-                          │  │  │ GET MIDPOINT │────▶│ CHECK IF REBALANCE NEEDED│  │  │
-                          │  │  │ from CLOB    │     │ - No active quotes? YES  │  │  │
-                          │  │  └──────────────┘     │ - Midpoint moved? YES    │  │  │
-                          │  │                       │ - Otherwise: NO          │  │  │
-                          │  │                       └──────────────────────────┘  │  │
-                          │  │                                  │                  │  │
-                          │  │           ┌──────────────────────┴───────────┐      │  │
-                          │  │           ▼                                  ▼      │  │
-                          │  │   ┌───────────────┐                  ┌───────────┐  │  │
-                          │  │   │  REBALANCE    │                  │ KEEP      │  │  │
-                          │  │   │ 1. Cancel old │                  │ EXISTING  │  │  │
-                          │  │   │ 2. Place new  │                  │ QUOTES    │  │  │
-                          │  │   └───────────────┘                  └───────────┘  │  │
-                          │  │           │                                  │      │  │
-                          │  │           └──────────────────────────────────┘      │  │
-                          │  │                          │                          │  │
-                          │  │                          ▼                          │  │
-                          │  │                  ┌───────────────┐                  │  │
-                          │  │                  │ SLEEP         │                  │  │
-                          │  │                  │ (30s default) │                  │  │
-                          │  │                  └───────────────┘                  │  │
-                          │  │                          │                          │  │
-                          │  └──────────────────────────┴──────────────────────────┘  │
-                          │                                                           │
-                          │  On SIGINT/SIGTERM: Cancel all orders, exit gracefully    │
-                          └───────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                            MARKET MAKER STARTUP                                  │
+└─────────────────────────────────────────────────────────────────────────────────┘
+                                      │
+                                      ▼
+┌────────────────────┐    ┌────────────────────┐    ┌────────────────────────────┐
+│  VALIDATE CONFIG   │───▶│   PRINT BANNER     │───▶│   INITIALIZE CLIENT        │
+│  - Token IDs set?  │    │   (show settings)  │    │   - Create auth client     │
+│  - Size >= min?    │    │                    │    │   - Create wallet/signer   │
+│  - Spread valid?   │    │                    │    │   - Get Polygon provider   │
+└────────────────────┘    └────────────────────┘    └────────────────────────────┘
+                                                                  │
+                                                                  ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                            PRE-FLIGHT CHECKS                                     │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│   ┌──────────────────┐    ┌──────────────────┐    ┌──────────────────────────┐  │
+│   │ CHECK INVENTORY  │───▶│ CHECK BALANCES   │───▶│ AUTO-SPLIT IF NEEDED     │  │
+│   │ - USDC balance   │    │ - YES tokens     │    │ - Approve USDC to CTF    │  │
+│   │ - MATIC for gas  │    │ - NO tokens      │    │ - Split USDC → YES + NO  │  │
+│   └──────────────────┘    │ - Sufficient?    │    └──────────────────────────┘  │
+│                           └──────────────────┘                                   │
+│                                                                                  │
+│   If pre-flight fails → EXIT with error                                          │
+│   If pre-flight passes → Continue to main loop                                   │
+└─────────────────────────────────────────────────────────────────────────────────┘
+                                      │
+                                      ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                            MAIN LOOP (while running)                             │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│   ┌──────────────┐     ┌────────────────────────┐                               │
+│   │ GET MIDPOINT │────▶│ REBALANCE NEEDED?      │                               │
+│   │ from CLOB    │     │ - No active quotes?    │──── YES ──┐                   │
+│   └──────────────┘     │ - Midpoint moved?      │           │                   │
+│                        └────────────────────────┘           ▼                   │
+│                                   │                 ┌───────────────┐           │
+│                                   │ NO              │  REBALANCE    │           │
+│                                   ▼                 │ 1. Cancel old │           │
+│                           ┌───────────┐             │ 2. Place new  │           │
+│                           │ KEEP      │             │    bid & ask  │           │
+│                           │ EXISTING  │             └───────────────┘           │
+│                           │ QUOTES    │                     │                   │
+│                           └───────────┘                     │                   │
+│                                   │                         │                   │
+│                                   └─────────────────────────┘                   │
+│                                             │                                    │
+│                                             ▼                                    │
+│                        ┌─────────────────────────────────────┐                  │
+│                        │ PERIODIC INVENTORY CHECK            │                  │
+│                        │ (every 10 cycles if autoSplit on)   │                  │
+│                        │ → Top up tokens if running low      │                  │
+│                        └─────────────────────────────────────┘                  │
+│                                             │                                    │
+│                                             ▼                                    │
+│                                     ┌───────────────┐                           │
+│                                     │ SLEEP         │                           │
+│                                     │ (30s default) │──────────┐                │
+│                                     └───────────────┘          │ (loop)         │
+│                                                                │                │
+│   On SIGINT/SIGTERM: Cancel all orders, exit gracefully ◄──────┘                │
+└─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Quote Generation
@@ -194,8 +227,14 @@ Score
 
 ```typescript
 export const MARKET_CONFIG: MarketParams = {
-  // Token ID from getEvent script
-  tokenId: "7571086539767038280082354847097805299113400214070193326451269217051324225887",
+  // YES token ID (first outcome)
+  yesTokenId: "75710865397670382800823548470978...",
+  
+  // NO token ID (second outcome)  
+  noTokenId: "10842869574567893452345678901234...",
+  
+  // Condition ID for CTF operations (split/merge)
+  conditionId: "0x1234567890abcdef...",
   
   // Tick size (minimum price increment)
   tickSize: "0.01",
@@ -223,19 +262,61 @@ export const STRATEGY_OVERRIDES = {
   // Rebalance if midpoint moves by this amount
   rebalanceThreshold: 0.005,  // 0.5 cents
 };
+
+// Inventory management settings
+export const DEFAULT_INVENTORY_PARAMS: InventoryConfig = {
+  // Minimum token balance per side (YES and NO)
+  minTokenBalance: 50,
+  
+  // Auto-split USDC into tokens if inventory is low
+  autoSplitEnabled: true,
+  
+  // Reserve multiplier for USDC (keeps extra for gas/emergencies)
+  usdcReserveMultiplier: 1.2,
+};
+
+// Set to false when ready for live trading
+export const dryRun = true;
 ```
+
+### Dry Run Mode
+
+The bot starts in **dry-run mode** by default (`dryRun: true`). In this mode:
+- All order calculations are performed normally
+- Orders are logged but NOT actually placed
+- Useful for testing configuration and observing behavior
+- Set `dryRun: false` in config.ts for live trading
+
+### Inventory Management
+
+The bot now supports **two-sided inventory** using CTF `splitPosition()`:
+
+1. **Pre-flight checks**: Before starting, the bot verifies:
+   - Sufficient USDC balance
+   - Sufficient YES and NO token balances
+   - Minimum MATIC for gas fees
+
+2. **Auto-split**: If `autoSplitEnabled: true` and token inventory is low:
+   - Bot automatically splits USDC into YES+NO tokens
+   - Amount calculated based on `minTokenBalance` and `usdcReserveMultiplier`
+
+3. **Periodic checks**: Every 10 cycles, inventory is re-checked
 
 ### Finding Market Parameters
 
 ```bash
-# Get token ID, tick size, and reward params
-npm run getEvent -- <event-slug-or-url>
+# Option 1: Find the best markets automatically
+npm run findBestMarkets                       # Shows ranked list of markets
+npm run findBestMarkets -- --details 1        # Details for top market
 
-# Example output:
-# Token ID: 7571086539767038280082354847097805299113400214070193326451269217051324225887
-# Tick Size: 0.01
-# Rewards Min Size: 20
-# Rewards Max Spread: 4.5
+# Option 2: Generate config from a specific event
+npm run selectMarket -- <event-slug-or-url>
+
+# Example workflow:
+npm run findBestMarkets                       # Find "nfc-south-winner-11" is top
+npm run selectMarket -- nfc-south-winner-11   # List markets in event
+npm run selectMarket -- nfc-south-winner-11 0 # Generate config for market 0
+# Outputs ready-to-paste TypeScript config
 ```
 
 ## Strategy Parameters
@@ -246,6 +327,15 @@ npm run getEvent -- <event-slug-or-url>
 | `spreadPercent` | 0.5 | Quote at X% of max spread from midpoint |
 | `refreshIntervalMs` | 30000 | Check/refresh quotes every N ms |
 | `rebalanceThreshold` | 0.005 | Rebalance if midpoint moves by N (0.5 cents) |
+| `dryRun` | true | Simulate orders without placing them |
+
+### Inventory Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `minTokenBalance` | 50 | Minimum YES/NO tokens to hold per side |
+| `autoSplitEnabled` | true | Auto-split USDC into tokens if low |
+| `usdcReserveMultiplier` | 1.2 | Keep 20% extra USDC as reserve |
 
 ### Tuning Guidelines
 
@@ -321,38 +411,61 @@ src/strategies/marketMaker/
 ============================================================
   MARKET MAKER BOT
 ============================================================
-  Token: 75710865397670382800...
+  YES Token: 75710865397670382800...
+  NO Token:  10842869574567893452...
   Order Size: 25 shares per side
   Spread: 50% of max (4.5c)
   Refresh: every 30s
   Rebalance Threshold: 0.5 cents
   Tick Size: 0.01
   Negative Risk: false
+  Mode: DRY RUN (orders will NOT be placed)
 ============================================================
   Press Ctrl+C to stop
 
-[12:00:00] Initializing authenticated client...
-[12:00:01] Client initialized successfully
-[12:00:01] Cycle #1 | Midpoint: $0.4500
-[12:00:01]   No active quotes, rebalancing...
-[12:00:01]   Placing quotes:
-[12:00:01]     BUY 25 @ $0.4275 (2.2c from mid)
-[12:00:01]     SELL 25 @ $0.4725 (2.2c from mid)
-[12:00:01]     Estimated scores: Bid=14.2, Ask=14.2
-[12:00:02]     Bid placed: a1b2c3d4e5f6...
-[12:00:02]     Ask placed: f6e5d4c3b2a1...
+[12:00:00] Running pre-flight checks...
+[12:00:01] Inventory Status:
+           USDC: $250.00
+           YES:  100 tokens
+           NO:   100 tokens
+           MATIC: 0.15
+[12:00:01] Pre-flight checks passed
+[12:00:01] Initializing authenticated client...
+[12:00:02] Client initialized successfully
+[12:00:02] Cycle #1 | Midpoint: $0.4500
+[12:00:02]   No active quotes, rebalancing...
+[12:00:02]   Placing quotes:
+[12:00:02]     BUY 25 @ $0.4275 (2.2c from mid)
+[12:00:02]     SELL 25 @ $0.4725 (2.2c from mid)
+[12:00:02]     Estimated scores: Bid=14.2, Ask=14.2
+[12:00:02]   [DRY RUN] Would place bid: BUY 25 @ $0.4275
+[12:00:02]   [DRY RUN] Would place ask: SELL 25 @ $0.4725
 [12:00:32] Cycle #2 | Midpoint: $0.4510
 [12:00:32]   Quotes still valid (Bid: $0.4275, Ask: $0.4725)
-[12:01:02] Cycle #3 | Midpoint: $0.4600
-[12:01:02]   Midpoint moved, rebalancing...
 ...
 
 ^C
 [12:05:30] Shutting down...
-[12:05:30] Cancelling all orders...
-[12:05:31] All orders cancelled
+[12:05:30] [DRY RUN] Would cancel all orders
 
 Goodbye!
+```
+
+### Live Trading Session
+
+```
+[12:00:00] Running pre-flight checks...
+[12:00:01] Inventory Status:
+           USDC: $50.00
+           YES:  10 tokens
+           NO:   10 tokens
+           MATIC: 0.15
+[12:00:01] WARNING: Insufficient YES tokens (10 < 50 required)
+[12:00:01] WARNING: Insufficient NO tokens (10 < 50 required)
+[12:00:01] Auto-split enabled, splitting $100 USDC into tokens...
+[12:00:05] Split successful: +100 YES, +100 NO tokens
+[12:00:05] Pre-flight checks passed
+...
 ```
 
 ## Risks and Considerations
@@ -360,10 +473,12 @@ Goodbye!
 ### Inventory Risk
 - If the market moves directionally, you may accumulate a position
 - Monitor your position and adjust accordingly
+- **Mitigated**: Bot now starts with two-sided inventory (YES+NO tokens)
 
 ### Execution Risk
 - Orders may get filled between refresh cycles
 - Partial fills may leave you with one-sided exposure
+- **Mitigated**: Pre-flight checks verify sufficient inventory before starting
 
 ### Price Impact
 - Larger order sizes may move the market
@@ -372,6 +487,12 @@ Goodbye!
 ### Technical Risks
 - Network issues may prevent order cancellation
 - Always monitor the bot while running
+- **Mitigated**: Dry-run mode allows testing without real orders
+
+### Gas Costs
+- CTF `splitPosition()` operations require MATIC for gas
+- Bot checks for minimum MATIC balance (0.01) before starting
+- Keep sufficient MATIC in your wallet for operations
 
 ## Related Documentation
 
@@ -380,5 +501,6 @@ Goodbye!
 
 ## See Also
 
+- `npm run findBestMarkets` - Find the highest-paying markets for liquidity rewards
 - `npm run checkRewards` - Check if your orders are earning rewards
 - `npm run getEvent` - Get market parameters for configuration

@@ -14,6 +14,7 @@ import type {
   ParsedOutcome,
   MarketRewardParams,
 } from "@/types/gamma.js";
+import type { MarketWithRewards } from "@/types/rewards.js";
 
 /**
  * Extracts the slug from a Polymarket URL or returns the input if already a slug.
@@ -196,4 +197,121 @@ export async function fetchMarketRewardParams(
     rewardsMinSize: market.rewardsMinSize ?? 0,
     rewardsMaxSpread: market.rewardsMaxSpread ?? 0,
   };
+}
+
+/**
+ * Raw market response from Polymarket rewards API.
+ * Uses snake_case field names.
+ */
+interface RewardsMarketResponse {
+  market_id: number;
+  condition_id: string;
+  question: string;
+  market_slug: string;
+  volume_24hr: number;
+  event_id: number;
+  event_slug: string;
+  image: string;
+  tokens: Array<{ token_id: string; outcome: string; price: number }>;
+  rewards_config: Array<{
+    asset_address: string;
+    start_date: string;
+    end_date: string;
+    rate_per_day: number;
+    total_rewards: number;
+  }>;
+  rewards_max_spread: number;
+  rewards_min_size: number;
+  earning_percentage: number;
+  spread: number;
+  market_competitiveness: number;
+}
+
+/**
+ * Options for fetching markets with rewards.
+ */
+export interface FetchMarketsWithRewardsOptions {
+  /** Maximum number of markets to fetch (default: 100) */
+  limit?: number;
+  /** Maximum rewardsMinSize - filter markets by min shares required for rewards */
+  maxMinSize?: number;
+}
+
+/**
+ * Fetches markets with active reward programs from Polymarket rewards API.
+ *
+ * @param options - Filtering options
+ * @param fetcher - Optional fetch function for testing
+ * @returns Array of markets with reward info
+ *
+ * @example
+ * const markets = await fetchMarketsWithRewards({ limit: 50 });
+ * console.log(`Found ${markets.length} markets with rewards`);
+ */
+export async function fetchMarketsWithRewards(
+  options: FetchMarketsWithRewardsOptions = {},
+  fetcher: typeof fetch = fetch
+): Promise<MarketWithRewards[]> {
+  const {
+    limit = 100,
+    maxMinSize,
+  } = options;
+
+  // Use the Polymarket rewards API which returns only markets with active rewards
+  const url = `https://polymarket.com/api/rewards/markets?limit=${limit}`;
+  const response = await fetcher(url);
+
+  if (!response.ok) {
+    throw new Error(
+      `Failed to fetch rewards markets: ${response.status} ${response.statusText}`
+    );
+  }
+
+  const responseData = (await response.json()) as {
+    data: RewardsMarketResponse[];
+    total_count: number;
+  };
+  const rawMarkets = responseData.data;
+
+  // Filter and transform markets
+  const markets: MarketWithRewards[] = rawMarkets
+    .filter((m) => {
+      // Apply max min size filter (for reward eligibility)
+      if (maxMinSize !== undefined && m.rewards_min_size > maxMinSize) return false;
+      // Only include markets with active reward config
+      if (!m.rewards_max_spread || m.rewards_max_spread <= 0) return false;
+      return true;
+    })
+    .map((m) => {
+      // Calculate daily rewards from rewards_config
+      const rewardsDaily = m.rewards_config?.reduce(
+        (sum, rc) => sum + (rc.rate_per_day || 0),
+        0
+      ) ?? 0;
+
+      return {
+        id: String(m.market_id),
+        question: m.question,
+        conditionId: m.condition_id,
+        eventSlug: m.event_slug,
+        eventTitle: m.question, // API doesn't provide event title separately
+        slug: m.market_slug,
+        groupItemTitle: undefined,
+        clobTokenIds: m.tokens?.map(t => t.token_id).join(","),
+        active: true, // Only active markets are in rewards API
+        closed: false,
+        acceptingOrders: true,
+        enableOrderBook: true,
+        negRisk: undefined,
+        liquidityNum: 0, // Not provided by rewards API
+        volume24hr: m.volume_24hr ?? 0,
+        rewardsMinSize: m.rewards_min_size ?? 0,
+        rewardsMaxSpread: m.rewards_max_spread ?? 0,
+        spread: m.spread,
+        competitive: m.market_competitiveness,
+        rewardsDaily,
+      };
+    });
+
+  return markets;
 }

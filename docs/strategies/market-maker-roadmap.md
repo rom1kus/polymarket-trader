@@ -12,23 +12,27 @@ Organized by **Impact** and **Effort**. Priority items directly prevent losses o
 Fix before next production run.
 
 ### Pre-Flight Checks
-- [ ] Balance check before placing orders (query USDC + token balances)
-- [ ] Skip orders when insufficient balance (don't attempt orders that will fail)
-- [ ] Halt bot if both sides fail repeatedly
-- [ ] Log warnings when operating one-sided
+- [x] Balance check before placing orders (query USDC + token balances)
+- [x] Skip orders when insufficient balance (don't attempt orders that will fail)
+- [x] Halt bot if both sides fail repeatedly
+- [x] Log warnings when operating one-sided
 
 ### Two-Sided Liquidity
-- [ ] Seed inventory before starting (require both USDC + tokens)
-- [ ] Token minting via CTF `splitPosition()` (split USDC into YES+NO tokens)
+- [x] Seed inventory before starting (require both USDC + tokens)
+- [x] Token minting via CTF `splitPosition()` (split USDC into YES+NO tokens)
 - [ ] Alternative: Buy tokens first via limit order before starting MM
 
 ### Inventory Management
-- [ ] Track current position on each cycle
+- [x] Track current position on each cycle
 - [ ] Position limits (max tokens before stopping BUY side)
 - [ ] Inventory-skewed quoting (widen bid when long, tighten ask)
 
 ### Testing
-- [ ] **Dry-run mode** - Simulate without placing real orders
+- [x] **Dry-run mode** - Simulate without placing real orders
+
+### Two-Sided Quoting (Future)
+- [ ] Quote both YES and NO tokens simultaneously (full two-sided market making)
+- [ ] Currently quotes YES token only; needs extension to quote NO token with inverted prices
 
 ---
 
@@ -120,4 +124,4 @@ Fix before next production run.
 
 ---
 
-*Last updated: 2024-12-30*
+*Last updated: 2025-01-05 - Implemented pre-flight checks, two-sided liquidity (CTF split), inventory tracking, and dry-run mode*

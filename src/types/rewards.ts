@@ -88,3 +88,76 @@ export interface RewardCheckResult {
   /** Human-readable summary */
   summary: string;
 }
+
+/**
+ * Market with reward parameters from Gamma API.
+ * Used for finding high-reward markets.
+ */
+export interface MarketWithRewards {
+  /** Market ID */
+  id: string;
+  /** Market question/title */
+  question: string;
+  /** Condition ID for trading */
+  conditionId: string;
+  /** Event slug for the parent event */
+  eventSlug: string;
+  /** Event title */
+  eventTitle: string;
+  /** Market slug */
+  slug: string;
+  /** Group item title (for multi-outcome events) */
+  groupItemTitle?: string;
+  /** CLOB token IDs (comma-separated or JSON array) */
+  clobTokenIds?: string;
+  /** Whether market is active */
+  active: boolean;
+  /** Whether market is closed */
+  closed: boolean;
+  /** Whether market accepts orders */
+  acceptingOrders: boolean;
+  /** Whether order book is enabled */
+  enableOrderBook: boolean;
+  /** Whether this is a negative risk market */
+  negRisk?: boolean;
+  /** Liquidity in USD */
+  liquidityNum: number;
+  /** 24h volume in USD */
+  volume24hr: number;
+  /** Minimum order size for reward eligibility (shares) */
+  rewardsMinSize: number;
+  /** Maximum spread from midpoint for rewards (cents) */
+  rewardsMaxSpread: number;
+  /** Current spread from order book */
+  spread?: number;
+  /** Competitiveness score (0-1, lower = less competition) */
+  competitive?: number;
+  /** Daily reward amount in USD (if available from API) */
+  rewardsDaily?: number;
+}
+
+/**
+ * Score breakdown for market attractiveness.
+ */
+export interface MarketAttractivenessScore {
+  /** Overall attractiveness score (higher = better) */
+  total: number;
+  /** Score component from spread tolerance */
+  spreadScore: number;
+  /** Score component from min size requirement */
+  sizeScore: number;
+  /** Score component from liquidity */
+  liquidityScore: number;
+  /** Score component from competition (inverted) */
+  competitionScore: number;
+  /** Score component from daily rewards (if available) */
+  rewardsScore: number;
+}
+
+/**
+ * Market with calculated attractiveness score.
+ */
+export interface RankedMarket extends MarketWithRewards {
+  /** Calculated attractiveness score breakdown */
+  attractiveness: MarketAttractivenessScore;
+}

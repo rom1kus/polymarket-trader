@@ -3,12 +3,16 @@
  */
 
 import type { MarketParams } from "@/types/strategy.js";
+import type { InventoryConfig } from "@/types/inventory.js";
+
+// Re-export InventoryConfig for convenience
+export type { InventoryConfig } from "@/types/inventory.js";
 
 /**
- * Configuration for the market maker strategy
+ * Configuration for the market maker strategy.
  */
 export interface MarketMakerConfig {
-  /** Market parameters (token, tick size, etc.) */
+  /** Market parameters (tokens, condition, tick size, etc.) */
   market: MarketParams;
   /** Size per order in shares */
   orderSize: number;
@@ -18,6 +22,13 @@ export interface MarketMakerConfig {
   refreshIntervalMs: number;
   /** Midpoint change threshold to trigger rebalance (e.g., 0.005 = 0.5 cents) */
   rebalanceThreshold: number;
+  /** Inventory management settings */
+  inventory: InventoryConfig;
+  /**
+   * Dry run mode - simulate without placing real orders or executing splits.
+   * Set to true for safe testing.
+   */
+  dryRun: boolean;
 }
 
 /**
