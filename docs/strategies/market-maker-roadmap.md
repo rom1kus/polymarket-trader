@@ -50,9 +50,9 @@ Fix before next production run.
 - [ ] Dynamic spread widening during high volatility
 
 ### Real-Time Data
-- [ ] WebSocket for midpoint updates
+- [x] WebSocket for midpoint updates
 - [ ] WebSocket for fill notifications
-- [ ] Order book depth monitoring
+- [x] Order book depth monitoring (via WebSocket book events)
 
 ### UI / Visualization
 - [ ] Separate web UI for monitoring and debugging
@@ -124,4 +124,4 @@ Fix before next production run.
 
 ---
 
-*Last updated: 2025-01-05 - Implemented pre-flight checks, two-sided liquidity (CTF split), inventory tracking, and dry-run mode*
+*Last updated: 2025-01-07 - Added WebSocket real-time price updates with trailing debounce and fallback polling*

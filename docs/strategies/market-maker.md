@@ -62,39 +62,34 @@ npm run marketMaker
                                       │
                                       ▼
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│                            MAIN LOOP (while running)                             │
+│                    MAIN LOOP (WebSocket Mode - Default)                          │
 ├─────────────────────────────────────────────────────────────────────────────────┤
 │                                                                                  │
-│   ┌──────────────┐     ┌────────────────────────┐                               │
-│   │ GET MIDPOINT │────▶│ REBALANCE NEEDED?      │                               │
-│   │ from CLOB    │     │ - No active quotes?    │──── YES ──┐                   │
-│   └──────────────┘     │ - Midpoint moved?      │           │                   │
-│                        └────────────────────────┘           ▼                   │
-│                                   │                 ┌───────────────┐           │
-│                                   │ NO              │  REBALANCE    │           │
-│                                   ▼                 │ 1. Cancel old │           │
-│                           ┌───────────┐             │ 2. Place new  │           │
-│                           │ KEEP      │             │    bid & ask  │           │
-│                           │ EXISTING  │             └───────────────┘           │
-│                           │ QUOTES    │                     │                   │
-│                           └───────────┘                     │                   │
-│                                   │                         │                   │
-│                                   └─────────────────────────┘                   │
-│                                             │                                    │
-│                                             ▼                                    │
-│                        ┌─────────────────────────────────────┐                  │
-│                        │ PERIODIC INVENTORY CHECK            │                  │
-│                        │ (every 10 cycles if autoSplit on)   │                  │
-│                        │ → Top up tokens if running low      │                  │
-│                        └─────────────────────────────────────┘                  │
-│                                             │                                    │
-│                                             ▼                                    │
-│                                     ┌───────────────┐                           │
-│                                     │ SLEEP         │                           │
-│                                     │ (30s default) │──────────┐                │
-│                                     └───────────────┘          │ (loop)         │
-│                                                                │                │
-│   On SIGINT/SIGTERM: Cancel all orders, exit gracefully ◄──────┘                │
+│   ┌──────────────────────────────────────────────────────────────────────────┐  │
+│   │                        WebSocket Connection                               │  │
+│   │   Connect to: wss://ws-subscriptions-clob.polymarket.com/ws/market       │  │
+│   │   Subscribe to: token ID with custom_feature_enabled: true               │  │
+│   └──────────────────────────────────────────────────────────────────────────┘  │
+│                                      │                                           │
+│                                      ▼                                           │
+│   ┌──────────────────────────────────────────────────────────────────────────┐  │
+│   │  On Midpoint Update (from WebSocket)                                      │  │
+│   │  ┌──────────────────┐    ┌──────────────────┐    ┌───────────────────┐   │  │
+│   │  │ TRAILING DEBOUNCE│───▶│ REBALANCE NEEDED?│───▶│    REBALANCE      │   │  │
+│   │  │ (wait 50ms for   │    │ - Threshold check│    │ 1. Cancel old     │   │  │
+│   │  │  price to settle)│    │ - Has quotes?    │    │ 2. Place new      │   │  │
+│   │  └──────────────────┘    └──────────────────┘    └───────────────────┘   │  │
+│   └──────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                  │
+│   ┌──────────────────────────────────────────────────────────────────────────┐  │
+│   │  Fallback: If WebSocket disconnects → Poll REST API every 30s            │  │
+│   └──────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                  │
+│   ┌──────────────────────────────────────────────────────────────────────────┐  │
+│   │  Periodic: Inventory check (every 10 rebalances if autoSplit on)         │  │
+│   └──────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                  │
+│   On SIGINT/SIGTERM: Disconnect WebSocket, cancel all orders, exit gracefully   │
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -325,9 +320,20 @@ npm run selectMarket -- nfc-south-winner-11 0 # Generate config for market 0
 |-----------|---------|-------------|
 | `orderSize` | 10 | Size per order in shares |
 | `spreadPercent` | 0.5 | Quote at X% of max spread from midpoint |
-| `refreshIntervalMs` | 30000 | Check/refresh quotes every N ms |
+| `refreshIntervalMs` | 30000 | Check/refresh quotes every N ms (polling mode only) |
 | `rebalanceThreshold` | 0.005 | Rebalance if midpoint moves by N (0.5 cents) |
 | `dryRun` | true | Simulate orders without placing them |
+
+### WebSocket Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `webSocket.enabled` | true | Use WebSocket for real-time price updates |
+| `webSocket.debounceMs` | 50 | Trailing debounce delay before rebalancing (ms) |
+| `webSocket.fallbackPollingMs` | 30000 | Fallback polling interval when WebSocket disconnects |
+| `webSocket.pingIntervalMs` | 10000 | Ping interval to keep WebSocket alive |
+| `webSocket.reconnectDelayMs` | 1000 | Initial reconnect delay (exponential backoff) |
+| `webSocket.maxReconnectDelayMs` | 30000 | Maximum reconnect delay |
 
 ### Inventory Parameters
 
@@ -359,36 +365,62 @@ orderSize: 25,           // Smaller orders
 
 ```
 src/strategies/marketMaker/
-├── index.ts   # Main entry point and runner loop
-├── config.ts  # Strategy configuration (EDIT THIS!)
-├── quoter.ts  # Quote generation logic
-└── types.ts   # TypeScript type definitions
+├── index.ts       # Main entry point (thin orchestrator, ~110 lines)
+├── config.ts      # Strategy configuration (EDIT THIS!)
+├── types.ts       # TypeScript type definitions
+├── quoter.ts      # Quote generation logic
+├── lifecycle.ts   # Startup/shutdown, validation, banner
+├── executor.ts    # Order placement, cancellation, CTF splits
+└── modes/         # Execution mode implementations
+    ├── index.ts       # Mode exports
+    ├── websocket.ts   # WebSocket real-time runner
+    └── polling.ts     # REST polling runner
 ```
 
 ### Component Interaction
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                            index.ts (Runner)                             │
+│                       index.ts (Thin Orchestrator)                       │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                          │
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────────────────┐  │
-│  │   config.ts  │    │   quoter.ts  │    │  @/utils/* (shared)      │  │
-│  │              │    │              │    │                          │  │
-│  │ MARKET_CONFIG│───▶│generateQuotes│    │ ● authClient.ts         │  │
-│  │ STRATEGY_... │    │shouldRebalance    │ ● orders.ts              │  │
-│  │              │    │estimateScore │◄──▶│ ● rewards.ts             │  │
-│  │              │    │formatQuote   │    │ ● helpers.ts             │  │
-│  └──────────────┘    └──────────────┘    └──────────────────────────┘  │
+│  1. Validate config (lifecycle.ts)                                       │
+│  2. Print banner (lifecycle.ts)                                          │
+│  3. Initialize clients (authClient, Safe)                                │
+│  4. Run pre-flight checks (inventory.ts)                                 │
+│  5. Delegate to mode runner ──┬──▶ modes/websocket.ts (default)          │
+│                               └──▶ modes/polling.ts   (fallback)         │
 │                                                                          │
 └─────────────────────────────────────────────────────────────────────────┘
+                                    │
+        ┌───────────────────────────┼───────────────────────────┐
+        ▼                           ▼                           ▼
+┌──────────────┐           ┌──────────────┐           ┌──────────────┐
+│ lifecycle.ts │           │  executor.ts │           │  quoter.ts   │
+│              │           │              │           │              │
+│ validateConfig           │ placeQuotes  │           │generateQuotes│
+│ printBanner  │           │ cancelOrders │           │shouldRebalance
+│ createShutdown           │ executeSplit │           │estimateScore │
+└──────────────┘           └──────────────┘           └──────────────┘
+                                    │
+                                    ▼
+                           ┌──────────────────────────┐
+                           │  @/utils/* (shared)      │
+                           │                          │
+                           │ ● authClient.ts          │
+                           │ ● orders.ts              │
+                           │ ● rewards.ts             │
+                           │ ● websocket.ts           │
+                           │ ● inventory.ts           │
+                           │ ● ctf.ts                 │
+                           └──────────────────────────┘
 ```
 
 ### Data Flow
 
 ```
 ┌─────────────┐      ┌─────────────┐      ┌─────────────┐
-│   Config    │─────▶│   Quoter    │─────▶│   Orders    │
+│   Config    │─────▶│   Quoter    │─────▶│  Executor   │
 │             │      │             │      │             │
 │ tokenId     │      │ Calculates  │      │ Places BID  │
 │ orderSize   │      │ bid/ask     │      │ and ASK     │

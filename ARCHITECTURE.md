@@ -30,10 +30,16 @@ polymarket-trader/
 │   │   └── findBestMarkets.ts # Finds highest-paying markets for liquidity rewards
 │   ├── strategies/       # Automated trading strategies
 │   │   └── marketMaker/  # Market maker bot for liquidity rewards
-│   │       ├── index.ts  # Main entry point and runner loop
-│   │       ├── config.ts # Strategy configuration (edit this!)
-│   │       ├── types.ts  # Strategy-specific types
-│   │       └── quoter.ts # Quote generation logic
+│   │       ├── index.ts      # Main entry point (thin orchestrator)
+│   │       ├── config.ts     # Strategy configuration (edit this!)
+│   │       ├── types.ts      # Strategy-specific types
+│   │       ├── quoter.ts     # Quote generation logic
+│   │       ├── lifecycle.ts  # Startup/shutdown, validation, banner
+│   │       ├── executor.ts   # Order placement, cancellation, splits
+│   │       └── modes/        # Execution mode implementations
+│   │           ├── index.ts      # Mode exports
+│   │           ├── websocket.ts  # WebSocket real-time runner
+│   │           └── polling.ts    # REST polling runner
 │   ├── types/            # Shared TypeScript type definitions
 │   │   ├── balance.ts    # Balance and allowance types
 │   │   ├── gamma.ts      # Types for Gamma API (events, markets metadata)
@@ -136,6 +142,19 @@ Types for position tracking:
 - `Position` - Position in a single token (size, hasPosition)
 - `MarketPosition` - Complete position for a binary market (YES + NO + net exposure)
 - `PositionsSummary` - Summary of all positions across multiple markets
+
+#### `src/types/websocket.ts`
+Types for Polymarket WebSocket API (`wss://ws-subscriptions-clob.polymarket.com`):
+- `WebSocketState` - Connection states (disconnected, connecting, connected, reconnecting)
+- `MarketSubscriptionMessage` - Subscription message for market channel
+- `BestBidAskEvent` - Best bid/ask update event (requires `custom_feature_enabled`)
+- `LastTradePriceEvent` - Trade execution notification
+- `PriceChangeEvent` - Level 2 order book updates
+- `BookEvent` - Full order book snapshot (sent on initial subscription)
+- `TickSizeChangeEvent` - Tick size change notification
+- `MarketEvent` - Union type for all market channel events
+- `WebSocketManagerOptions` - Configuration options for `PolymarketWebSocket`
+- `TokenPriceState` - Internal state for tracking best bid/ask per token
 
 ### `src/utils/`
 
@@ -278,6 +297,31 @@ Common helper utilities:
 - `createLogger(prefix?)` - Creates a prefixed logger function
 - `log(message)` - Simple timestamped logger
 
+#### `src/utils/websocket.ts`
+Polymarket WebSocket manager for real-time market data:
+- `PolymarketWebSocket` - WebSocket client class for real-time price updates
+  - `connect()` - Connects to WebSocket server
+  - `disconnect()` - Disconnects and cleans up
+  - `subscribe(tokenIds)` - Subscribes to additional tokens
+  - `unsubscribe(tokenIds)` - Unsubscribes from tokens
+  - `getMidpoint(tokenId)` - Gets current midpoint for a token
+  - `getState()` - Returns connection state
+  - `isConnected()` - Returns true if connected
+- `TrailingDebounce` - Utility for rate-limiting midpoint updates
+  - `update(value, timestamp)` - Updates value, resets timer
+  - `cancel()` - Cancels pending callback
+  - `flush()` - Forces immediate callback execution
+  - `getLatestValue()` - Returns latest value
+
+**WebSocket Endpoint:** `wss://ws-subscriptions-clob.polymarket.com/ws/market`
+
+**Features:**
+- Auto-reconnect with exponential backoff (1s initial, 30s max)
+- Ping/pong keep-alive every 10 seconds
+- Midpoint calculation: `(best_bid + best_ask) / 2`
+- Falls back to `last_trade_price` when spread > 10 cents
+- Supports `best_bid_ask`, `price_change`, `book`, `last_trade_price` events
+
 ### `src/scripts/`
 Directory for executable utility scripts. Each script should:
 - Import utilities from `@/utils/*` using path aliases
@@ -338,10 +382,20 @@ Market maker bot for earning Polymarket liquidity rewards.
 > **Full documentation:** [docs/strategies/market-maker.md](docs/strategies/market-maker.md)
 
 **Files:**
-- `index.ts` - Main entry point and runner loop
+- `index.ts` - Main entry point (thin orchestrator ~110 lines)
 - `config.ts` - Strategy configuration (edit this to set your market!)
-- `types.ts` - Strategy-specific types (MarketMakerConfig, ActiveQuotes, etc.)
+- `types.ts` - Strategy-specific types (MarketMakerConfig, WebSocketConfig, ActiveQuotes, etc.)
 - `quoter.ts` - Quote generation logic using shared reward utilities
+- `lifecycle.ts` - Startup/shutdown handlers, config validation, banner printing
+- `executor.ts` - Order placement, cancellation, and CTF split execution
+- `modes/` - Execution mode implementations
+  - `index.ts` - Mode exports barrel file
+  - `websocket.ts` - WebSocket real-time runner with fallback polling
+  - `polling.ts` - Traditional REST API polling runner
+
+**Modes:**
+- **WebSocket mode (default)**: Real-time price updates via WebSocket with ~50ms reaction time
+- **Polling mode**: Traditional REST-based polling (fallback when WebSocket disconnects)
 
 ## Environment Variables
 
@@ -380,6 +434,14 @@ Central Limit Order Book API for trading operations:
 - Order placement and management
 - Trade execution
 
+### CLOB WebSocket (`wss://ws-subscriptions-clob.polymarket.com`)
+Real-time market data via WebSocket:
+- Order book snapshots and updates
+- Best bid/ask updates
+- Last trade price notifications
+- Market channel (public): `/ws/market`
+- User channel (authenticated): `/ws/user`
+
 ### Gamma API (`https://gamma-api.polymarket.com`)
 Metadata API for events and markets:
 - Event data (title, description, volume, liquidity)
@@ -394,6 +456,7 @@ Metadata API for events and markets:
 - `@polymarket/clob-client` - Official Polymarket CLOB API client
 - `@safe-global/protocol-kit` - Safe (Gnosis Safe) SDK for transaction execution
 - `@safe-global/types-kit` - TypeScript types for Safe SDK
+- `ws` - WebSocket client for real-time market data
 - `ethers` (via @ethersproject/*) - Ethereum library for contract encoding
   - `@ethersproject/abi` - ABI encoding for contract calls
   - `@ethersproject/contracts` - Contract interaction for read operations
@@ -438,4 +501,4 @@ The Safe SDK (`@safe-global/protocol-kit`) handles:
 - All utilities in `src/utils/`
 
 ---
-*Last updated: Migrated CTF operations to Safe SDK for proper Gnosis Safe transaction execution*
+*Last updated: Refactored market maker strategy into modular components (lifecycle, executor, modes)*

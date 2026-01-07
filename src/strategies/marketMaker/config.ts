@@ -7,7 +7,7 @@
  *   npm run selectMarket -- <event-slug-or-url>
  */
 
-import type { MarketMakerConfig, InventoryConfig } from "./types.js";
+import type { MarketMakerConfig, InventoryConfig, WebSocketConfig } from "./types.js";
 import type { MarketParams } from "@/types/strategy.js";
 
 /**
@@ -26,6 +26,24 @@ export const DEFAULT_INVENTORY_PARAMS: InventoryConfig = {
 };
 
 /**
+ * Default WebSocket configuration.
+ */
+export const DEFAULT_WEBSOCKET_PARAMS: WebSocketConfig = {
+  /** Enable WebSocket for real-time price updates */
+  enabled: true,
+  /** Trailing debounce delay before rebalancing (ms) */
+  debounceMs: 50,
+  /** Fallback polling interval when WebSocket disconnected (ms) */
+  fallbackPollingMs: 30_000,
+  /** Ping interval to keep connection alive (ms) */
+  pingIntervalMs: 10_000,
+  /** Initial reconnect delay (ms) */
+  reconnectDelayMs: 1_000,
+  /** Maximum reconnect delay (ms) */
+  maxReconnectDelayMs: 30_000,
+};
+
+/**
  * Default strategy parameters.
  * These can be overridden when creating a config.
  */
@@ -34,12 +52,14 @@ export const DEFAULT_STRATEGY_PARAMS = {
   orderSize: 10,
   /** Quote at 50% of max spread from midpoint (closer = more rewards) */
   spreadPercent: 0.5,
-  /** Refresh quotes every 30 seconds */
+  /** Refresh quotes every 30 seconds (used when WebSocket is disabled) */
   refreshIntervalMs: 30_000,
   /** Rebalance if midpoint moves by 0.5 cents */
   rebalanceThreshold: 0.005,
   /** Inventory management settings */
   inventory: DEFAULT_INVENTORY_PARAMS,
+  /** WebSocket configuration */
+  webSocket: DEFAULT_WEBSOCKET_PARAMS,
   /** Dry run mode - ENABLED BY DEFAULT FOR SAFETY */
   dryRun: true,
 } as const;
@@ -73,6 +93,10 @@ export function createMarketMakerConfig(
     refreshIntervalMs: overrides?.refreshIntervalMs ?? DEFAULT_STRATEGY_PARAMS.refreshIntervalMs,
     rebalanceThreshold: overrides?.rebalanceThreshold ?? DEFAULT_STRATEGY_PARAMS.rebalanceThreshold,
     inventory: overrides?.inventory ?? DEFAULT_STRATEGY_PARAMS.inventory,
+    webSocket: {
+      ...DEFAULT_WEBSOCKET_PARAMS,
+      ...overrides?.webSocket,
+    },
     dryRun: overrides?.dryRun ?? DEFAULT_STRATEGY_PARAMS.dryRun,
   };
 }
@@ -124,20 +148,30 @@ export const MARKET_CONFIG: MarketParams = {
  * Strategy parameter overrides.
  */
 export const STRATEGY_OVERRIDES: Partial<Omit<MarketMakerConfig, "market">> = {
-  // 25 shares per side (above 20 minimum for rewards)
-  orderSize: 25,
+  // 20 shares per side (above 20 minimum for rewards)
+  orderSize: 20,
 
   // Quote at 50% of max spread (e.g., 2.25c from midpoint if maxSpread=4.5)
   spreadPercent: 0.5,
 
-  // Refresh every 30 seconds
+  // Refresh every 30 seconds (fallback when WebSocket is disabled)
   refreshIntervalMs: 30_000,
 
   // Inventory management
   inventory: {
-    minTokenBalance: 25,
+    minTokenBalance: 20,
     autoSplitEnabled: true,
     usdcReserveMultiplier: 1.2,
+  },
+
+  // WebSocket configuration (real-time price updates)
+  webSocket: {
+    enabled: true,
+    debounceMs: 50,           // 50ms trailing debounce
+    fallbackPollingMs: 30_000, // Fall back to 30s polling if WS disconnects
+    pingIntervalMs: 10_000,
+    reconnectDelayMs: 1_000,
+    maxReconnectDelayMs: 30_000,
   },
 
   // =========================================================================
@@ -145,7 +179,7 @@ export const STRATEGY_OVERRIDES: Partial<Omit<MarketMakerConfig, "market">> = {
   // =========================================================================
   // When true: Orders are simulated, splits are logged but not executed
   // When false: Real orders placed, real USDC split into tokens
-  dryRun: true,
+  dryRun: false,
 };
 
 /**
