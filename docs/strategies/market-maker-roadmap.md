@@ -29,10 +29,19 @@ Fix before next production run.
 ### Testing
 - [x] **Dry-run mode** - Simulate without placing real orders
 
-### Two-Sided Quoting
-- [ ] Does it make sense at all? Check if the orderbook is mirrored for NO positions first.
-- [ ] Quote both YES and NO tokens simultaneously (full two-sided market making)
-- [ ] Currently quotes YES token only; needs extension to quote NO token with inverted prices
+### Two-Sided Quoting ✅ RESOLVED
+- [x] **Order books ARE mirrored** - Confirmed that placing orders on YES token automatically
+      appears on the NO order book with inverted prices (BUY YES @ $0.48 = SELL NO @ $0.52)
+- [x] **No separate NO token orders needed** - Would be redundant and could create conflicts
+- [x] **Rewards already account for both books** - Per Polymarket docs, reward formulas use
+      both `m` (YES) and `m'` (NO complement), but since books are mirrored, the same orders
+      are counted correctly from both perspectives
+
+> **Investigation (2025-01-09):** Tested by placing YES orders and switching to NO orderbook -
+> orders appeared mirrored with inverted prices and could be cancelled from either view.
+> Polymarket's reward equations (Qone/Qtwo) explicitly include both m and m' but this is
+> handled automatically via the mirrored order book. Current implementation (BUY+SELL on YES)
+> provides full two-sided liquidity on both books.
 
 ---
 
@@ -124,4 +133,4 @@ Fix before next production run.
 
 ---
 
-*Last updated: 2025-01-07 - Added WebSocket real-time price updates with trailing debounce and fallback polling*
+*Last updated: 2025-01-09 - Resolved two-sided quoting investigation (order books are mirrored, no changes needed)*
