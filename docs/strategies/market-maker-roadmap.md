@@ -20,7 +20,6 @@ Fix before next production run.
 ### Two-Sided Liquidity
 - [x] Seed inventory before starting (require both USDC + tokens)
 - [x] Token minting via CTF `splitPosition()` (split USDC into YES+NO tokens)
-- [ ] Alternative: Buy tokens first via limit order before starting MM
 
 ### Inventory Management
 - [x] Track current position on each cycle
@@ -30,7 +29,8 @@ Fix before next production run.
 ### Testing
 - [x] **Dry-run mode** - Simulate without placing real orders
 
-### Two-Sided Quoting (Future)
+### Two-Sided Quoting
+- [ ] Does it make sense at all? Check if the orderbook is mirrored for NO positions first.
 - [ ] Quote both YES and NO tokens simultaneously (full two-sided market making)
 - [ ] Currently quotes YES token only; needs extension to quote NO token with inverted prices
 
