@@ -1,7 +1,7 @@
 import type { Market } from "@/types/polymarket.js";
 import type { OrderBookData } from "@/types/polymarket.js";
 import type { GammaEvent, ParsedGammaMarket } from "@/types/gamma.js";
-import type { RewardCheckResult } from "@/types/rewards.js";
+import type { RewardCheckResult, RewardCheckResultWithEarnings } from "@/types/rewards.js";
 import {
   getYesOutcome,
   getYesProbability,
@@ -403,6 +403,92 @@ export function formatRewardResults(results: RewardCheckResult[]): string {
 
     lines.push(`  Effective Score: ${result.effectiveScore.toFixed(2)}`);
     lines.push(`\n  >>> ${result.summary}`);
+  }
+
+  lines.push("\n" + "=".repeat(70));
+
+  return lines.join("\n");
+}
+
+/**
+ * Formats reward check results with earning percentage comparison.
+ *
+ * Shows both calculated and API earning percentages for validation.
+ *
+ * @param results - Array of reward check results with earnings data
+ * @returns Formatted multi-line string
+ */
+export function formatRewardResultsWithEarnings(
+  results: RewardCheckResultWithEarnings[]
+): string {
+  if (results.length === 0) {
+    return "";
+  }
+
+  const lines: string[] = [];
+
+  for (const result of results) {
+    lines.push("\n" + "=".repeat(70));
+    lines.push(`MARKET: ${result.market.tokenId.substring(0, 20)}...`);
+    lines.push("=".repeat(70));
+    lines.push(`  Midpoint: ${(result.market.midpoint * 100).toFixed(2)}%`);
+    lines.push(`  Min Size for Rewards: ${result.market.rewardsMinSize} shares`);
+    lines.push(`  Max Spread for Rewards: ${result.market.rewardsMaxSpread}c`);
+    lines.push(`  Two-Sided Required: ${result.twoSidedRequired ? "YES" : "NO"}`);
+
+    lines.push("\n  YOUR ORDERS:");
+    lines.push("  " + "-".repeat(66));
+
+    for (const order of result.orders) {
+      const status = order.eligible ? "+" : "-";
+      const scoreStr =
+        order.score > 0
+          ? `Score: ${order.score.toFixed(2)}`
+          : order.reason || "";
+      lines.push(
+        `  ${status} ${order.side.padEnd(4)} ${order.size.toFixed(2).padStart(8)} @ ${order.price.toFixed(4)} | Spread: ${order.spreadFromMid.toFixed(2)}c | ${scoreStr}`
+      );
+    }
+
+    lines.push("\n  SCORES:");
+    lines.push("  " + "-".repeat(66));
+    lines.push(`  Your BUY Score:   ${result.totalBuyScore.toFixed(2)}`);
+    lines.push(`  Your SELL Score:  ${result.totalSellScore.toFixed(2)}`);
+    lines.push(`  Your Q_min:       ${result.effectiveScore.toFixed(2)}`);
+
+    lines.push("");
+    lines.push(`  Order Book BID Score: ${result.orderBookBidScore.toFixed(2)}`);
+    lines.push(`  Order Book ASK Score: ${result.orderBookAskScore.toFixed(2)}`);
+    lines.push(`  Total Q_min:          ${result.totalQMin.toFixed(2)}`);
+
+    lines.push("\n  EARNING PERCENTAGE:");
+    lines.push("  " + "-".repeat(66));
+    lines.push(`  Our Calculation:  ${result.ourEarningPct.toFixed(4)}%`);
+
+    if (result.apiEarningPct !== undefined) {
+      lines.push(`  API Response:     ${result.apiEarningPct.toFixed(4)}%`);
+
+      const diff = result.ourEarningPct - result.apiEarningPct;
+      const diffAbs = Math.abs(diff);
+      const match = diffAbs < 0.01 ? "MATCH" : diffAbs < 0.1 ? "~CLOSE" : "DIFF";
+      const diffSign = diff >= 0 ? "+" : "";
+      lines.push(`  Difference:       ${diffSign}${diff.toFixed(4)}% (${match})`);
+    } else {
+      lines.push(`  API Response:     (not available)`);
+    }
+
+    // Overall status
+    lines.push("");
+    if (result.eligible) {
+      let dailyEst = "";
+      if (result.ratePerDay !== undefined && result.ratePerDay > 0) {
+        const dailyEarning = (result.ourEarningPct / 100) * result.ratePerDay;
+        dailyEst = ` (~$${dailyEarning.toFixed(2)}/day from $${result.ratePerDay}/day pool)`;
+      }
+      lines.push(`  >>> ELIGIBLE: Earning ${result.ourEarningPct.toFixed(2)}%${dailyEst}`);
+    } else {
+      lines.push(`  >>> ${result.summary}`);
+    }
   }
 
   lines.push("\n" + "=".repeat(70));

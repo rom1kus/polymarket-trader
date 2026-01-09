@@ -228,6 +228,31 @@ interface RewardsMarketResponse {
 }
 
 /**
+ * User-specific rewards data for a market.
+ * Returned when maker_address is provided to the rewards API.
+ */
+export interface UserRewardData {
+  /** Condition ID for the market */
+  conditionId: string;
+  /** Token IDs for the market */
+  tokenIds: string[];
+  /** Market question */
+  question: string;
+  /** Maximum spread from midpoint for rewards (in cents) */
+  rewardsMaxSpread: number;
+  /** Minimum order size for rewards (in shares) */
+  rewardsMinSize: number;
+  /** Daily reward rate in USD */
+  ratePerDay: number;
+  /** User's earning percentage (0-100) from API */
+  earningPercentage: number;
+  /** Current spread on the market */
+  spread: number;
+  /** Market competitiveness score */
+  marketCompetitiveness: number;
+}
+
+/**
  * Options for fetching markets with rewards.
  */
 export interface FetchMarketsWithRewardsOptions {
@@ -314,4 +339,146 @@ export async function fetchMarketsWithRewards(
     });
 
   return markets;
+}
+
+/**
+ * Fetches user-specific rewards data for markets from the Polymarket rewards API.
+ *
+ * When maker_address is provided, the API returns the user's earning_percentage
+ * for each market.
+ *
+ * @param conditionIds - Array of condition IDs to fetch rewards for
+ * @param makerAddress - User's wallet address to get earning percentage
+ * @param fetcher - Optional fetch function for testing
+ * @returns Map of condition ID to user reward data
+ *
+ * @example
+ * const rewardsMap = await fetchUserRewardsData(["0x123..."], "0xabc...");
+ * console.log(rewardsMap.get("0x123...")?.earningPercentage); // 17.59
+ */
+export async function fetchUserRewardsData(
+  conditionIds: string[],
+  makerAddress: string,
+  fetcher: typeof fetch = fetch
+): Promise<Map<string, UserRewardData>> {
+  // Build query params with condition IDs and maker address
+  const params = new URLSearchParams();
+  for (const id of conditionIds) {
+    params.append("id", id);
+  }
+  params.append("makerAddress", makerAddress);
+
+  const url = `https://polymarket.com/api/rewards/markets?${params.toString()}`;
+  const response = await fetcher(url);
+
+  if (!response.ok) {
+    throw new Error(
+      `Failed to fetch user rewards data: ${response.status} ${response.statusText}`
+    );
+  }
+
+  const responseData = (await response.json()) as {
+    data: RewardsMarketResponse[];
+    total_count: number;
+  };
+
+  const rewardsMap = new Map<string, UserRewardData>();
+
+  for (const m of responseData.data) {
+    const ratePerDay = m.rewards_config?.reduce(
+      (sum, rc) => sum + (rc.rate_per_day || 0),
+      0
+    ) ?? 0;
+
+    rewardsMap.set(m.condition_id, {
+      conditionId: m.condition_id,
+      tokenIds: m.tokens?.map(t => t.token_id) ?? [],
+      question: m.question,
+      rewardsMaxSpread: m.rewards_max_spread ?? 0,
+      rewardsMinSize: m.rewards_min_size ?? 0,
+      ratePerDay,
+      earningPercentage: m.earning_percentage ?? 0,
+      spread: m.spread ?? 0,
+      marketCompetitiveness: m.market_competitiveness ?? 0,
+    });
+  }
+
+  return rewardsMap;
+}
+
+/**
+ * Market rewards data fetched from the API.
+ */
+export interface MarketRewardsInfo {
+  /** Market competitiveness (total Q_min for one side) */
+  marketCompetitiveness: number;
+  /** Daily reward rate in USD */
+  ratePerDay: number;
+}
+
+/**
+ * Fetches market rewards data for specific condition IDs.
+ *
+ * Note: The Polymarket rewards API doesn't support filtering by condition ID,
+ * so this fetches all markets and filters client-side. This is inefficient
+ * but necessary since the API ignores filter params.
+ *
+ * @param conditionIds - Array of condition IDs to look up
+ * @param fetcher - Optional fetch function for testing
+ * @returns Map of condition ID to market rewards info
+ */
+export async function fetchMarketRewardsInfo(
+  conditionIds: string[],
+  fetcher: typeof fetch = fetch
+): Promise<Map<string, MarketRewardsInfo>> {
+  // The API returns paginated results, we need to fetch enough to find our markets
+  // For now, fetch up to 500 markets (should cover most cases)
+  const url = `https://polymarket.com/api/rewards/markets?limit=500`;
+  const response = await fetcher(url);
+
+  if (!response.ok) {
+    throw new Error(
+      `Failed to fetch market rewards info: ${response.status} ${response.statusText}`
+    );
+  }
+
+  const responseData = (await response.json()) as {
+    data: RewardsMarketResponse[];
+    total_count: number;
+  };
+
+  const conditionIdSet = new Set(conditionIds);
+  const result = new Map<string, MarketRewardsInfo>();
+
+  for (const m of responseData.data) {
+    if (conditionIdSet.has(m.condition_id)) {
+      const ratePerDay = m.rewards_config?.reduce(
+        (sum, rc) => sum + (rc.rate_per_day || 0),
+        0
+      ) ?? 0;
+
+      result.set(m.condition_id, {
+        marketCompetitiveness: m.market_competitiveness ?? 0,
+        ratePerDay,
+      });
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Fetches market competitiveness data for specific condition IDs.
+ * @deprecated Use fetchMarketRewardsInfo instead for more complete data
+ */
+export async function fetchMarketCompetitiveness(
+  conditionIds: string[],
+  fetcher: typeof fetch = fetch
+): Promise<Map<string, number>> {
+  const info = await fetchMarketRewardsInfo(conditionIds, fetcher);
+  const result = new Map<string, number>();
+  for (const [id, data] of info) {
+    result.set(id, data.marketCompetitiveness);
+  }
+  return result;
 }

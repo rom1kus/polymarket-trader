@@ -113,6 +113,7 @@ Types for reward eligibility checking and market ranking:
 - `MarketRewardParamsWithMidpoint` - Reward params with current midpoint
 - `OrderRewardStatus` - Reward status for a single order
 - `RewardCheckResult` - Complete reward check result for a market
+- `RewardCheckResultWithEarnings` - Result with earning % comparison to API
 - `MarketWithRewards` - Market with reward parameters for ranking
 - `MarketAttractivenessScore` - Score breakdown for market attractiveness
 - `RankedMarket` - Market with calculated attractiveness score
@@ -265,6 +266,7 @@ Gamma API utilities for fetching event and market metadata:
 - `fetchEventWithParsedMarkets(slugOrUrl)` - Fetches and parses event with all markets
 - `fetchMarketRewardParams(tokenId, fetcher?)` - Fetches reward params for a token
 - `fetchMarketsWithRewards(options?, fetcher?)` - Fetches markets with reward programs for ranking
+- `fetchMarketRewardsInfo(conditionIds, fetcher?)` - Fetches market competitiveness and rate_per_day
 
 #### `src/utils/markets.ts`
 Market data utilities:
@@ -287,6 +289,8 @@ Reward calculation and eligibility checking:
 - `calculateSpreadCents(price, midpoint)` - Calculates spread in cents
 - `isTwoSidedRequired(midpoint)` - Checks if two-sided liquidity is required
 - `calculateEffectiveScore(buyScore, sellScore, midpoint)` - Calculates effective score
+- `calculateTotalQScore(bids, asks, midpoint, maxSpread)` - Calculates total Q_min from order book
+- `calculateEarningPercentage(yourQMin, totalQMin)` - Calculates earning percentage
 - `getMarketRewardParamsWithMidpoint(client, tokenId)` - Fetches params with midpoint
 - `evaluateOrderReward(order, params)` - Evaluates single order reward status
 - `checkOrdersRewardEligibility(orders, params)` - Checks orders for a token
@@ -303,6 +307,7 @@ Output formatting utilities:
 - `formatMarketsDetailed(markets)` - Detailed market data with token IDs
 - `formatOrderBookTable(data)` - Formats order book pricing table
 - `formatRewardResults(results)` - Formats reward check results
+- `formatRewardResultsWithEarnings(results)` - Formats results with earning % comparison
 
 #### `src/utils/helpers.ts`
 Common helper utilities:

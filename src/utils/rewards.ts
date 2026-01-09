@@ -117,6 +117,108 @@ export function calculateEffectiveScore(
 export const DEFAULT_SCALING_FACTOR = 3.0;
 
 /**
+ * Order book summary with bids and asks at each price level.
+ * Matches @polymarket/clob-client OrderBookSummary.
+ */
+export interface OrderBookLevel {
+  price: string;
+  size: string;
+}
+
+/**
+ * Result of calculating total Q score from the order book.
+ */
+export interface TotalQScoreResult {
+  /** Sum of scores for all bids within max spread */
+  totalBidScore: number;
+  /** Sum of scores for all asks within max spread */
+  totalAskScore: number;
+  /** Q_min = min(totalBidScore, totalAskScore) */
+  totalQMin: number;
+  /** Number of bid levels within reward range */
+  eligibleBidLevels: number;
+  /** Number of ask levels within reward range */
+  eligibleAskLevels: number;
+}
+
+/**
+ * Calculates the total Q score for an entire order book.
+ *
+ * Scores all bids and asks within the max spread from midpoint using
+ * the Polymarket quadratic formula: S(v,s) = ((v-s)/v)² × size
+ *
+ * @param bids - Array of bid levels (price, size)
+ * @param asks - Array of ask levels (price, size)
+ * @param midpoint - Current market midpoint (0-1)
+ * @param maxSpreadCents - Maximum spread for rewards (in cents)
+ * @returns Total Q score breakdown
+ *
+ * @example
+ * const result = calculateTotalQScore(orderBook.bids, orderBook.asks, 0.55, 5);
+ * console.log(`Total Q_min: ${result.totalQMin}`);
+ */
+export function calculateTotalQScore(
+  bids: OrderBookLevel[],
+  asks: OrderBookLevel[],
+  midpoint: number,
+  maxSpreadCents: number
+): TotalQScoreResult {
+  let totalBidScore = 0;
+  let totalAskScore = 0;
+  let eligibleBidLevels = 0;
+  let eligibleAskLevels = 0;
+
+  // Score all bids
+  for (const bid of bids) {
+    const price = parseFloat(bid.price);
+    const size = parseFloat(bid.size);
+    const spreadCents = calculateSpreadCents(price, midpoint);
+
+    if (spreadCents < maxSpreadCents) {
+      const score = calculateRewardScore(spreadCents, maxSpreadCents, size);
+      totalBidScore += score;
+      eligibleBidLevels++;
+    }
+  }
+
+  // Score all asks
+  for (const ask of asks) {
+    const price = parseFloat(ask.price);
+    const size = parseFloat(ask.size);
+    const spreadCents = calculateSpreadCents(price, midpoint);
+
+    if (spreadCents < maxSpreadCents) {
+      const score = calculateRewardScore(spreadCents, maxSpreadCents, size);
+      totalAskScore += score;
+      eligibleAskLevels++;
+    }
+  }
+
+  return {
+    totalBidScore,
+    totalAskScore,
+    totalQMin: Math.min(totalBidScore, totalAskScore),
+    eligibleBidLevels,
+    eligibleAskLevels,
+  };
+}
+
+/**
+ * Calculates earning percentage from your Q_min and total Q_min.
+ *
+ * @param yourQMin - Your Q_min score
+ * @param totalQMin - Total Q_min from the order book
+ * @returns Earning percentage (0-100)
+ */
+export function calculateEarningPercentage(
+  yourQMin: number,
+  totalQMin: number
+): number {
+  if (totalQMin === 0) return 0;
+  return (yourQMin / totalQMin) * 100;
+}
+
+/**
  * Fetches reward parameters for a market including current midpoint.
  *
  * Combines Gamma API reward params with CLOB midpoint data.

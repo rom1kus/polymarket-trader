@@ -90,6 +90,27 @@ export interface RewardCheckResult {
 }
 
 /**
+ * Reward check result with earning percentage comparison.
+ * Extends RewardCheckResult with order book Q_min and API comparison.
+ */
+export interface RewardCheckResultWithEarnings extends RewardCheckResult {
+  /** Condition ID for the market */
+  conditionId: string;
+  /** Total Q_min from the order book (min of bid/ask scores) */
+  totalQMin: number;
+  /** Total bid score from order book */
+  orderBookBidScore: number;
+  /** Total ask score from order book */
+  orderBookAskScore: number;
+  /** Our calculated earning percentage */
+  ourEarningPct: number;
+  /** API-reported earning percentage (undefined if not available) */
+  apiEarningPct?: number;
+  /** Daily reward rate for this market in USD (undefined if not available) */
+  ratePerDay?: number;
+}
+
+/**
  * Market with reward parameters from Gamma API.
  * Used for finding high-reward markets.
  */
