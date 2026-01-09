@@ -6,13 +6,15 @@ import { log } from "@/utils/helpers.js";
 import { getMidpoint } from "@/utils/orders.js";
 import { runPreFlightChecks } from "@/utils/inventory.js";
 import { PolymarketWebSocket, TrailingDebounce } from "@/utils/websocket.js";
+import { UserWebSocket, tradeEventToFill } from "@/utils/userWebsocket.js";
 import { shouldRebalance } from "../quoter.js";
 import { placeQuotes, cancelExistingOrders, executeSplitIfNeeded } from "../executor.js";
-import { createInitialState, createShutdownHandler, registerShutdownHandlers } from "../lifecycle.js";
+import { createInitialState, createShutdownHandler, registerShutdownHandlers, createPositionTracker } from "../lifecycle.js";
 import type { ClobClient } from "@polymarket/clob-client";
 import type { JsonRpcProvider } from "@ethersproject/providers";
 import type { SafeInstance } from "@/utils/ctf.js";
 import type { MarketMakerConfig, MarketMakerState } from "../types.js";
+import type { PositionTracker } from "@/utils/positionTracker.js";
 
 export interface WebSocketRunnerContext {
   config: MarketMakerConfig;
@@ -41,6 +43,12 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<voi
 
   // Fallback polling timer
   let fallbackTimer: NodeJS.Timeout | null = null;
+
+  // Initialize position tracker for position limits
+  const positionTracker: PositionTracker | null = await createPositionTracker(client, config);
+
+  // User WebSocket for fill notifications (only if position tracking is enabled)
+  let userWs: UserWebSocket | null = null;
 
   /**
    * Executes a rebalance cycle.
@@ -73,7 +81,7 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<voi
         }
 
         // Place new quotes
-        state.activeQuotes = await placeQuotes(client, config, midpoint);
+        state.activeQuotes = await placeQuotes(client, config, midpoint, positionTracker);
         state.lastError = null;
       } else {
         const bidInfo = state.activeQuotes.bid
@@ -190,6 +198,9 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<voi
     debounce.cancel();
     stopFallbackPolling();
     ws.disconnect();
+    if (userWs) {
+      userWs.disconnect();
+    }
   });
   registerShutdownHandlers(shutdown);
 
@@ -198,6 +209,83 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<voi
   try {
     await ws.connect();
     log("WebSocket connected, waiting for price updates...");
+
+    // Connect to user WebSocket for fill notifications (if position tracking enabled)
+    if (positionTracker && client.creds) {
+      log("Connecting to user WebSocket for fill tracking...");
+      userWs = new UserWebSocket({
+        apiKey: client.creds.key,
+        apiSecret: client.creds.secret,
+        passphrase: client.creds.passphrase,
+        onTrade: async (trade) => {
+          // Only process trades for our market's tokens
+          if (
+            trade.asset_id === config.market.yesTokenId ||
+            trade.asset_id === config.market.noTokenId
+          ) {
+            // Capture limit status BEFORE processing fill
+            const limitStatusBefore = positionTracker.getLimitStatus();
+            
+            const fill = tradeEventToFill(trade);
+            const isNew = positionTracker.processFill(fill);
+            
+            if (isNew) {
+              // Check if position limits status changed AFTER processing fill
+              const limitStatusAfter = positionTracker.getLimitStatus();
+              
+              // Trigger rebalance if:
+              // 1. We just hit a limit (need to stop quoting blocked side)
+              // 2. We just cleared a limit (can start quoting again)
+              // 3. Blocked side changed (e.g., from BUY blocked to SELL blocked)
+              const limitChanged = 
+                limitStatusBefore.isLimitReached !== limitStatusAfter.isLimitReached ||
+                limitStatusBefore.blockedSide !== limitStatusAfter.blockedSide;
+              
+              if (limitChanged) {
+                log("  Position limit status changed, triggering rebalance...");
+                
+                // Get current midpoint for rebalance
+                // Use debounce's latest value if available, otherwise fetch
+                const currentMidpoint = debounce.getLatestValue();
+                if (currentMidpoint !== null) {
+                  // Don't await - let it run async to not block WebSocket processing
+                  executeRebalance(currentMidpoint, "fill").catch((err) => {
+                    log(`  Fill-triggered rebalance error: ${err}`);
+                  });
+                } else {
+                  // Fetch midpoint and rebalance
+                  getMidpoint(client, config.market.yesTokenId)
+                    .then((midpoint) => executeRebalance(midpoint, "fill"))
+                    .catch((err) => {
+                      log(`  Fill-triggered rebalance error: ${err}`);
+                    });
+                }
+              }
+            }
+          }
+        },
+        onConnected: () => {
+          log("User WebSocket connected");
+        },
+        onDisconnected: () => {
+          log("User WebSocket disconnected");
+        },
+        onError: (error) => {
+          log(`User WebSocket error: ${error.message}`);
+        },
+        onReconnecting: (attempt) => {
+          log(`User WebSocket reconnecting (attempt ${attempt})...`);
+        },
+      });
+
+      try {
+        await userWs.connect();
+      } catch (error) {
+        log(`User WebSocket connection failed: ${error}`);
+        // Continue without user WebSocket - position tracking will be stale
+        // but that's better than crashing
+      }
+    }
 
     // Do an initial rebalance using REST to get started immediately
     const initialMidpoint = await getMidpoint(client, config.market.yesTokenId);

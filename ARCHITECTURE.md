@@ -143,6 +143,16 @@ Types for position tracking:
 - `MarketPosition` - Complete position for a binary market (YES + NO + net exposure)
 - `PositionsSummary` - Summary of all positions across multiple markets
 
+#### `src/types/fills.ts`
+Types for fill tracking and position limits:
+- `Fill` - Trade fill event (id, tokenId, side, price, size, timestamp)
+- `PositionState` - Current position state (yesTokens, noTokens, netExposure)
+- `PositionLimitsConfig` - Position limit settings (maxNetExposure, warnThreshold)
+- `QuoteSideCheck` - Result of checking if a side can be quoted
+- `PositionLimitStatus` - Current status relative to limits
+- `ReconciliationResult` - Result of reconciling persisted vs actual position
+- `PersistedMarketState` - Schema for JSON file storage
+
 #### `src/types/websocket.ts`
 Types for Polymarket WebSocket API (`wss://ws-subscriptions-clob.polymarket.com`):
 - `WebSocketState` - Connection states (disconnected, connecting, connected, reconnecting)
@@ -155,6 +165,10 @@ Types for Polymarket WebSocket API (`wss://ws-subscriptions-clob.polymarket.com`
 - `MarketEvent` - Union type for all market channel events
 - `WebSocketManagerOptions` - Configuration options for `PolymarketWebSocket`
 - `TokenPriceState` - Internal state for tracking best bid/ask per token
+- `UserTradeEvent` - Trade fill notification from user channel
+- `UserOrderEvent` - Order placement/cancellation from user channel
+- `UserEvent` - Union type for user channel events
+- `UserSubscriptionMessage` - Authentication message for user channel
 
 ### `src/utils/`
 
@@ -322,6 +336,50 @@ Polymarket WebSocket manager for real-time market data:
 - Falls back to `last_trade_price` when spread > 10 cents
 - Supports `best_bid_ask`, `price_change`, `book`, `last_trade_price` events
 
+#### `src/utils/userWebsocket.ts`
+Authenticated WebSocket manager for user-specific events:
+- `UserWebSocket` - WebSocket client for fill and order notifications
+  - `connect()` - Connects and authenticates
+  - `disconnect()` - Disconnects and cleans up
+  - `isConnected()` - Returns connection status
+- `tradeEventToFill(trade)` - Converts WebSocket trade event to Fill type
+
+**WebSocket Endpoint:** `wss://ws-subscriptions-clob.polymarket.com/ws/user`
+
+**Features:**
+- Requires API credentials (apiKey, secret, passphrase)
+- Real-time fill notifications for position tracking
+- Auto-reconnect with exponential backoff
+- Ping/pong keep-alive
+
+#### `src/utils/storage.ts`
+JSON file persistence for position tracking data:
+- `loadMarketState(conditionId)` - Loads persisted state from disk
+- `saveMarketState(state)` - Saves state to disk
+- `createEmptyState(conditionId, yesTokenId, noTokenId)` - Creates new state
+- `appendFill(conditionId, yesTokenId, noTokenId, fill)` - Appends a fill
+- `setInitialPosition(conditionId, yesTokenId, noTokenId, yes, no)` - Sets initial position
+
+**Storage Location:** `./data/fills-{conditionId}.json`
+
+#### `src/utils/positionTracker.ts`
+Position tracking for market making strategies:
+- `PositionTracker` - Class for tracking YES/NO positions and enforcing limits
+  - `initialize(yesBalance, noBalance)` - Initialize from current balances
+  - `processFill(fill)` - Process a fill and update position
+  - `canQuoteBuy()` - Check if BUY side is allowed
+  - `canQuoteSell()` - Check if SELL side is allowed
+  - `getPositionState()` - Get current position state
+  - `getLimitStatus()` - Get limit utilization status
+  - `formatStatus()` - Format position for display
+- `createPositionTracker(conditionId, yesTokenId, noTokenId, maxNetExposure)` - Factory function
+
+**Position Limits:**
+- Net exposure = yesTokens - noTokens
+- Positive = long YES, Negative = long NO
+- Blocks BUY when exposure >= maxNetExposure
+- Blocks SELL when exposure <= -maxNetExposure
+
 ### `src/scripts/`
 Directory for executable utility scripts. Each script should:
 - Import utilities from `@/utils/*` using path aliases
@@ -386,16 +444,21 @@ Market maker bot for earning Polymarket liquidity rewards.
 - `config.ts` - Strategy configuration (edit this to set your market!)
 - `types.ts` - Strategy-specific types (MarketMakerConfig, WebSocketConfig, ActiveQuotes, etc.)
 - `quoter.ts` - Quote generation logic using shared reward utilities
-- `lifecycle.ts` - Startup/shutdown handlers, config validation, banner printing
-- `executor.ts` - Order placement, cancellation, and CTF split execution
+- `lifecycle.ts` - Startup/shutdown handlers, config validation, banner printing, position tracker init
+- `executor.ts` - Order placement with position limit checking, cancellation, and CTF split execution
 - `modes/` - Execution mode implementations
   - `index.ts` - Mode exports barrel file
-  - `websocket.ts` - WebSocket real-time runner with fallback polling
+  - `websocket.ts` - WebSocket real-time runner with fallback polling and user channel
   - `polling.ts` - Traditional REST API polling runner
 
 **Modes:**
 - **WebSocket mode (default)**: Real-time price updates via WebSocket with ~50ms reaction time
 - **Polling mode**: Traditional REST-based polling (fallback when WebSocket disconnects)
+
+**Position Limits:**
+- Tracks YES/NO positions via user WebSocket fill notifications
+- Blocks one side when net exposure exceeds configured limits
+- Persists fills to `./data/` for reconciliation on restart
 
 ## Environment Variables
 
@@ -501,4 +564,4 @@ The Safe SDK (`@safe-global/protocol-kit`) handles:
 - All utilities in `src/utils/`
 
 ---
-*Last updated: Refactored market maker strategy into modular components (lifecycle, executor, modes)*
+*Last updated: Added fill tracking, position limits, and user WebSocket for real-time trade notifications*

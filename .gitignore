@@ -25,3 +25,6 @@ npm-debug.log*
 
 # TypeScript cache
 *.tsbuildinfo
+
+# Data files (position tracking, fills)
+data/

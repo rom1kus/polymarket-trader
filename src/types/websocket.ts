@@ -177,6 +177,132 @@ export type MarketEvent =
   | NewMarketEvent;
 
 // =============================================================================
+// User Channel Events (Authenticated)
+// =============================================================================
+
+/**
+ * Subscription message for the user channel.
+ * Requires authentication via apikey, secret, passphrase.
+ */
+export interface UserSubscriptionMessage {
+  /** Authentication API key */
+  auth: {
+    apiKey: string;
+    secret: string;
+    passphrase: string;
+  };
+  /** Channel type */
+  type: "user";
+}
+
+/**
+ * Maker order details within a trade event.
+ */
+export interface MakerOrderDetail {
+  /** Token ID of the maker order */
+  asset_id: string;
+  /** Amount matched from this maker order */
+  matched_amount: string;
+  /** Maker order ID */
+  order_id: string;
+  /** Outcome (YES/NO) */
+  outcome: string;
+  /** Owner API key */
+  owner: string;
+  /** Price of maker order */
+  price: string;
+}
+
+/**
+ * Trade event from user channel.
+ *
+ * Emitted when:
+ * - A market order is matched ("MATCHED")
+ * - A limit order is included in a trade ("MATCHED")
+ * - Subsequent status changes ("MINED", "CONFIRMED", "RETRYING", "FAILED")
+ */
+export interface UserTradeEvent {
+  /** Event type identifier */
+  event_type: "trade";
+  /** Message type */
+  type: "TRADE";
+  /** Unique trade ID */
+  id: string;
+  /** Token ID (asset) traded */
+  asset_id: string;
+  /** Market condition ID */
+  market: string;
+  /** Trade side */
+  side: "BUY" | "SELL";
+  /** Trade price as string */
+  price: string;
+  /** Trade size as string */
+  size: string;
+  /** Trade status */
+  status: "MATCHED" | "MINED" | "CONFIRMED" | "RETRYING" | "FAILED";
+  /** Taker order ID */
+  taker_order_id: string;
+  /** Array of maker orders in this trade */
+  maker_orders: MakerOrderDetail[];
+  /** Trade timestamp as string (Unix seconds) */
+  timestamp: string;
+  /** Match time as string (Unix seconds) */
+  matchtime: string;
+  /** Last update timestamp as string */
+  last_update: string;
+  /** Owner API key */
+  owner: string;
+  /** Trade owner API key */
+  trade_owner: string;
+  /** Outcome (YES/NO) */
+  outcome: string;
+}
+
+/**
+ * Order event from user channel.
+ *
+ * Emitted when:
+ * - An order is placed (PLACEMENT)
+ * - An order is partially matched (UPDATE)
+ * - An order is cancelled (CANCELLATION)
+ */
+export interface UserOrderEvent {
+  /** Event type identifier */
+  event_type: "order";
+  /** Order event type */
+  type: "PLACEMENT" | "UPDATE" | "CANCELLATION";
+  /** Order ID */
+  id: string;
+  /** Token ID (asset) */
+  asset_id: string;
+  /** Market condition ID */
+  market: string;
+  /** Order side */
+  side: "BUY" | "SELL";
+  /** Order price as string */
+  price: string;
+  /** Original order size as string */
+  original_size: string;
+  /** Amount matched so far as string */
+  size_matched: string;
+  /** Event timestamp as string */
+  timestamp: string;
+  /** Associated trade IDs (null if none) */
+  associate_trades: string[] | null;
+  /** Order owner API key */
+  order_owner: string;
+  /** Owner API key */
+  owner: string;
+  /** Outcome (YES/NO) */
+  outcome: string;
+}
+
+/**
+ * Union type for all user channel events.
+ */
+export type UserEvent = UserTradeEvent | UserOrderEvent;
+
+// =============================================================================
 // WebSocket Manager Types
 // =============================================================================
 

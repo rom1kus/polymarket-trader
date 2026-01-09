@@ -7,7 +7,7 @@
  *   npm run selectMarket -- <event-slug-or-url>
  */
 
-import type { MarketMakerConfig, InventoryConfig, WebSocketConfig } from "./types.js";
+import type { MarketMakerConfig, InventoryConfig, WebSocketConfig, PositionLimitsConfig } from "./types.js";
 import type { MarketParams } from "@/types/strategy.js";
 
 /**
@@ -23,6 +23,23 @@ export const DEFAULT_INVENTORY_PARAMS: InventoryConfig = {
   autoSplitEnabled: true,
   /** Keep 20% extra USDC as buffer for buy orders */
   usdcReserveMultiplier: 1.2,
+};
+
+/**
+ * Default position limits for risk management.
+ */
+export const DEFAULT_POSITION_LIMITS: PositionLimitsConfig = {
+  /**
+   * Maximum net exposure (|yesTokens - noTokens|) before blocking one side.
+   * E.g., 100 means stop buying YES when netExposure > 100,
+   * and stop selling YES when netExposure < -100.
+   */
+  maxNetExposure: 10,
+  /**
+   * Warning threshold as percentage of max (0-1).
+   * E.g., 0.8 means warn when at 80% of limit.
+   */
+  warnThreshold: 0.8,
 };
 
 /**
@@ -58,6 +75,8 @@ export const DEFAULT_STRATEGY_PARAMS = {
   rebalanceThreshold: 0.005,
   /** Inventory management settings */
   inventory: DEFAULT_INVENTORY_PARAMS,
+  /** Position limits for risk management */
+  positionLimits: DEFAULT_POSITION_LIMITS,
   /** WebSocket configuration */
   webSocket: DEFAULT_WEBSOCKET_PARAMS,
   /** Dry run mode - ENABLED BY DEFAULT FOR SAFETY */
@@ -93,6 +112,7 @@ export function createMarketMakerConfig(
     refreshIntervalMs: overrides?.refreshIntervalMs ?? DEFAULT_STRATEGY_PARAMS.refreshIntervalMs,
     rebalanceThreshold: overrides?.rebalanceThreshold ?? DEFAULT_STRATEGY_PARAMS.rebalanceThreshold,
     inventory: overrides?.inventory ?? DEFAULT_STRATEGY_PARAMS.inventory,
+    positionLimits: overrides?.positionLimits ?? DEFAULT_STRATEGY_PARAMS.positionLimits,
     webSocket: {
       ...DEFAULT_WEBSOCKET_PARAMS,
       ...overrides?.webSocket,
@@ -164,6 +184,12 @@ export const STRATEGY_OVERRIDES: Partial<Omit<MarketMakerConfig, "market">> = {
     usdcReserveMultiplier: 1.2,
   },
 
+  // Position limits for risk management
+  positionLimits: {
+    maxNetExposure: 10,  // Stop quoting one side at ±100 token exposure
+    warnThreshold: 0.8,   // Warn at 80% of limit
+  },
+
   // WebSocket configuration (real-time price updates)
   webSocket: {
     enabled: true,
@@ -179,7 +205,7 @@ export const STRATEGY_OVERRIDES: Partial<Omit<MarketMakerConfig, "market">> = {
   // =========================================================================
   // When true: Orders are simulated, splits are logged but not executed
   // When false: Real orders placed, real USDC split into tokens
-  dryRun: false,
+  dryRun: true,
 };
 
 /**

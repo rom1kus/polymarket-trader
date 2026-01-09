@@ -23,7 +23,7 @@ Fix before next production run.
 
 ### Inventory Management
 - [x] Track current position on each cycle
-- [ ] Position limits (max tokens before stopping BUY side)
+- [x] Position limits (max tokens before stopping BUY/SELL side)
 - [ ] Inventory-skewed quoting (widen bid when long, tighten ask)
 
 ### Testing
@@ -50,7 +50,7 @@ Fix before next production run.
 ### Risk Management
 - [ ] Stop-loss threshold (halt if P&L drops below limit)
 - [ ] Max daily loss limit with automatic shutdown
-- [ ] Fill tracking (poll trade history)
+- [x] Fill tracking (real-time via user WebSocket)
 - [ ] Real-time P&L calculation
 
 ### Market Volatility Protection
@@ -60,7 +60,7 @@ Fix before next production run.
 
 ### Real-Time Data
 - [x] WebSocket for midpoint updates
-- [ ] WebSocket for fill notifications
+- [x] WebSocket for fill notifications (user channel)
 - [x] Order book depth monitoring (via WebSocket book events)
 
 ### UI / Visualization
@@ -133,4 +133,4 @@ Fix before next production run.
 
 ---
 
-*Last updated: 2025-01-09 - Resolved two-sided quoting investigation (order books are mirrored, no changes needed)*
+*Last updated: 2025-01-09 - Added fill tracking via user WebSocket, position limits with hard stops*

@@ -4,9 +4,11 @@
 
 import type { MarketParams } from "@/types/strategy.js";
 import type { InventoryConfig } from "@/types/inventory.js";
+import type { PositionLimitsConfig } from "@/types/fills.js";
 
-// Re-export InventoryConfig for convenience
+// Re-export for convenience
 export type { InventoryConfig } from "@/types/inventory.js";
+export type { PositionLimitsConfig } from "@/types/fills.js";
 
 /**
  * WebSocket configuration options.
@@ -70,6 +72,8 @@ export interface MarketMakerConfig {
   rebalanceThreshold: number;
   /** Inventory management settings */
   inventory: InventoryConfig;
+  /** Position limits for risk management */
+  positionLimits: PositionLimitsConfig;
   /** WebSocket configuration for real-time price updates */
   webSocket: WebSocketConfig;
   /**

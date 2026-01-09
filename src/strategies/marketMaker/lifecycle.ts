@@ -4,7 +4,10 @@
 
 import { log } from "@/utils/helpers.js";
 import { cancelOrdersForToken } from "@/utils/orders.js";
+import { getTokenBalance } from "@/utils/balance.js";
+import { PositionTracker } from "@/utils/positionTracker.js";
 import type { ClobClient } from "@polymarket/clob-client";
+import type { JsonRpcProvider } from "@ethersproject/providers";
 import type { MarketMakerConfig, MarketMakerState } from "./types.js";
 
 /**
@@ -119,3 +122,63 @@ export function registerShutdownHandlers(handler: () => Promise<void>): void {
   process.on("SIGINT", handler);
   process.on("SIGTERM", handler);
 }
+
+/**
+ * Creates and initializes a PositionTracker for position limit management.
+ *
+ * Fetches current token balances from the CLOB API and initializes
+ * the tracker with the current position. On subsequent runs, it will
+ * also reconcile with persisted fills.
+ *
+ * @param client - Authenticated CLOB client
+ * @param config - Market maker configuration
+ * @returns Initialized position tracker, or null if position limits disabled
+ */
+export async function createPositionTracker(
+  client: ClobClient,
+  config: MarketMakerConfig
+): Promise<PositionTracker | null> {
+  // Skip if position limits are not configured
+  if (!config.positionLimits) {
+    log("Position limits not configured, skipping position tracking");
+    return null;
+  }
+
+  // Skip if maxNetExposure is 0 or Infinity (disabled)
+  if (
+    config.positionLimits.maxNetExposure === 0 ||
+    !isFinite(config.positionLimits.maxNetExposure)
+  ) {
+    log("Position limits disabled (maxNetExposure = 0 or Infinity)");
+    return null;
+  }
+
+  log("Initializing position tracker...");
+
+  // Create tracker instance
+  const tracker = new PositionTracker(
+    config.market.conditionId,
+    config.market.yesTokenId,
+    config.market.noTokenId,
+    config.positionLimits
+  );
+
+  // Fetch current balances from CLOB API
+  const [yesInfo, noInfo] = await Promise.all([
+    getTokenBalance(client, config.market.yesTokenId),
+    getTokenBalance(client, config.market.noTokenId),
+  ]);
+
+  // Initialize tracker with current balances
+  const result = tracker.initialize(yesInfo.balanceNumber, noInfo.balanceNumber);
+
+  if (result.warning) {
+    log(`Position reconciliation warning: ${result.warning}`);
+  }
+
+  // Log position summary
+  log("Position status:\n" + tracker.formatStatus());
+
+  return tracker;
+}
+
