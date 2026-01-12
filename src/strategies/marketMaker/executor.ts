@@ -1,33 +1,43 @@
 /**
- * Market Maker Executor - Order placement, cancellation, and CTF operations.
+ * Market Maker Executor - Order placement and cancellation.
+ *
+ * Places BUY orders on both YES and NO tokens:
+ * - BUY YES at (midpoint - offset) - equivalent to traditional bid
+ * - BUY NO at (1 - (midpoint + offset)) - equivalent to traditional ask
+ *
+ * This approach is USDC-only and doesn't require holding tokens upfront.
  */
 
 import { Side } from "@polymarket/clob-client";
 import { placeOrder, cancelOrdersForToken } from "@/utils/orders.js";
 import { log } from "@/utils/helpers.js";
-import { approveAndSplitFromSafe, type SafeInstance } from "@/utils/ctf.js";
 import { generateQuotes, formatQuote, estimateRewardScore } from "./quoter.js";
 import type { ClobClient } from "@polymarket/clob-client";
-import type { JsonRpcProvider } from "@ethersproject/providers";
 import type { MarketMakerConfig, ActiveQuotes } from "./types.js";
 import type { PositionTracker } from "@/utils/positionTracker.js";
 
 /**
  * Result of checking position limits before placing quotes.
+ *
+ * canBuyYes: controls YES quote (buying YES increases net exposure)
+ * canBuyNo: controls NO quote (buying NO decreases net exposure)
  */
 export interface QuoteLimitCheck {
-  /** Whether BUY side is allowed */
-  canBuy: boolean;
-  /** Whether SELL side is allowed */
-  canSell: boolean;
-  /** Reason if BUY is blocked */
-  buyBlockedReason?: string;
-  /** Reason if SELL is blocked */
-  sellBlockedReason?: string;
+  /** Whether BUY YES is allowed (increases net exposure) */
+  canBuyYes: boolean;
+  /** Whether BUY NO is allowed (decreases net exposure) */
+  canBuyNo: boolean;
+  /** Reason if BUY YES is blocked */
+  yesBlockedReason?: string;
+  /** Reason if BUY NO is blocked */
+  noBlockedReason?: string;
 }
 
 /**
  * Checks position limits to determine which sides can be quoted.
+ *
+ * - canQuoteBuy() controls YES quote (buying YES = positive exposure)
+ * - canQuoteSell() controls NO quote (buying NO = negative exposure, same as selling YES)
  *
  * @param positionTracker - Position tracker instance (optional for backward compatibility)
  * @returns Limit check result
@@ -37,27 +47,30 @@ export function checkPositionLimits(
 ): QuoteLimitCheck {
   if (!positionTracker) {
     // No position tracker - allow both sides
-    return { canBuy: true, canSell: true };
+    return { canBuyYes: true, canBuyNo: true };
   }
 
-  const buyCheck = positionTracker.canQuoteBuy();
-  const sellCheck = positionTracker.canQuoteSell();
+  // canQuoteBuy controls YES (buying YES increases exposure)
+  // canQuoteSell controls NO (buying NO decreases exposure, like selling YES)
+  const yesCheck = positionTracker.canQuoteBuy();
+  const noCheck = positionTracker.canQuoteSell();
 
   return {
-    canBuy: buyCheck.allowed,
-    canSell: sellCheck.allowed,
-    buyBlockedReason: buyCheck.reason,
-    sellBlockedReason: sellCheck.reason,
+    canBuyYes: yesCheck.allowed,
+    canBuyNo: noCheck.allowed,
+    yesBlockedReason: yesCheck.reason,
+    noBlockedReason: noCheck.reason,
   };
 }
 
 /**
- * Places bid and ask orders with position limit checking.
+ * Places YES and NO orders with position limit checking.
+ * Both orders are BUY orders on different tokens.
  * In dry run mode, logs the orders but doesn't place them.
  *
  * @param client - Authenticated CLOB client
  * @param config - Market maker configuration
- * @param midpoint - Current market midpoint
+ * @param midpoint - Current market midpoint for YES token
  * @param positionTracker - Position tracker for limit checking (optional)
  * @returns Active quotes result
  */
@@ -81,119 +94,121 @@ export async function placeQuotes(
   }
 
   // Determine which sides to quote
-  const quoteBid = limits.canBuy;
-  const quoteAsk = limits.canSell;
+  const quoteYes = limits.canBuyYes;
+  const quoteNo = limits.canBuyNo;
 
   // If both sides blocked, return early
-  if (!quoteBid && !quoteAsk) {
+  if (!quoteYes && !quoteNo) {
     log(`  Both sides blocked by position limits:`);
-    log(`    BUY: ${limits.buyBlockedReason}`);
-    log(`    SELL: ${limits.sellBlockedReason}`);
+    log(`    BUY YES: ${limits.yesBlockedReason}`);
+    log(`    BUY NO: ${limits.noBlockedReason}`);
     return {
-      bid: null,
-      ask: null,
+      yesQuote: null,
+      noQuote: null,
       lastMidpoint: midpoint,
     };
   }
 
   // Log what we're quoting
   log(`  Placing quotes:`);
-  if (quoteBid) {
-    log(`    ${formatQuote(quotes.bid, midpoint)}`);
+  if (quoteYes) {
+    log(`    ${formatQuote(quotes.yesQuote, "YES", midpoint)}`);
   } else {
-    log(`    BUY: BLOCKED - ${limits.buyBlockedReason}`);
+    log(`    BUY YES: BLOCKED - ${limits.yesBlockedReason}`);
   }
-  if (quoteAsk) {
-    log(`    ${formatQuote(quotes.ask, midpoint)}`);
+  if (quoteNo) {
+    log(`    ${formatQuote(quotes.noQuote, "NO", midpoint)}`);
   } else {
-    log(`    SELL: BLOCKED - ${limits.sellBlockedReason}`);
+    log(`    BUY NO: BLOCKED - ${limits.noBlockedReason}`);
   }
 
   // Estimate reward scores for active sides
-  if (quoteBid && quoteAsk) {
-    const bidScore = estimateRewardScore(quotes.bid, midpoint, config.market.maxSpread);
-    const askScore = estimateRewardScore(quotes.ask, midpoint, config.market.maxSpread);
-    log(`    Estimated scores: Bid=${bidScore.toFixed(1)}, Ask=${askScore.toFixed(1)}`);
-  } else if (quoteBid) {
-    const bidScore = estimateRewardScore(quotes.bid, midpoint, config.market.maxSpread);
-    log(`    Estimated score: Bid=${bidScore.toFixed(1)} (one-sided)`);
-  } else if (quoteAsk) {
-    const askScore = estimateRewardScore(quotes.ask, midpoint, config.market.maxSpread);
-    log(`    Estimated score: Ask=${askScore.toFixed(1)} (one-sided)`);
+  if (quoteYes && quoteNo) {
+    const yesScore = estimateRewardScore(quotes.yesQuote, "YES", midpoint, config.market.maxSpread);
+    const noScore = estimateRewardScore(quotes.noQuote, "NO", midpoint, config.market.maxSpread);
+    log(`    Estimated scores: YES=${yesScore.toFixed(1)}, NO=${noScore.toFixed(1)}`);
+  } else if (quoteYes) {
+    const yesScore = estimateRewardScore(quotes.yesQuote, "YES", midpoint, config.market.maxSpread);
+    log(`    Estimated score: YES=${yesScore.toFixed(1)} (one-sided)`);
+  } else if (quoteNo) {
+    const noScore = estimateRewardScore(quotes.noQuote, "NO", midpoint, config.market.maxSpread);
+    log(`    Estimated score: NO=${noScore.toFixed(1)} (one-sided)`);
   }
 
   // Dry run mode - don't actually place orders
   if (config.dryRun) {
     log(`    [DRY RUN] Orders simulated, not placed`);
     return {
-      bid: quoteBid ? { orderId: "dry-run-bid", price: quotes.bid.price } : null,
-      ask: quoteAsk ? { orderId: "dry-run-ask", price: quotes.ask.price } : null,
+      yesQuote: quoteYes ? { orderId: "dry-run-yes", price: quotes.yesQuote.price } : null,
+      noQuote: quoteNo ? { orderId: "dry-run-no", price: quotes.noQuote.price } : null,
       lastMidpoint: midpoint,
     };
   }
 
   // Place orders (only the allowed sides)
-  const orderPromises: Promise<{ side: "BUY" | "SELL"; result: Awaited<ReturnType<typeof placeOrder>> }>[] = [];
+  // Both orders are BUY orders, but on different tokens
+  const orderPromises: Promise<{ token: "YES" | "NO"; result: Awaited<ReturnType<typeof placeOrder>> }>[] = [];
 
-  if (quoteBid) {
+  if (quoteYes) {
     orderPromises.push(
       placeOrder(client, {
         tokenId: config.market.yesTokenId,
-        price: quotes.bid.price,
-        size: quotes.bid.size,
+        price: quotes.yesQuote.price,
+        size: quotes.yesQuote.size,
         side: Side.BUY,
         tickSize: config.market.tickSize,
         negRisk: config.market.negRisk,
-      }).then((result) => ({ side: "BUY" as const, result }))
+      }).then((result) => ({ token: "YES" as const, result }))
     );
   }
 
-  if (quoteAsk) {
+  if (quoteNo) {
     orderPromises.push(
       placeOrder(client, {
-        tokenId: config.market.yesTokenId,
-        price: quotes.ask.price,
-        size: quotes.ask.size,
-        side: Side.SELL,
+        tokenId: config.market.noTokenId,
+        price: quotes.noQuote.price,
+        size: quotes.noQuote.size,
+        side: Side.BUY,
         tickSize: config.market.tickSize,
         negRisk: config.market.negRisk,
-      }).then((result) => ({ side: "SELL" as const, result }))
+      }).then((result) => ({ token: "NO" as const, result }))
     );
   }
 
   const results = await Promise.all(orderPromises);
 
   // Process results
-  let bidResult: { orderId: string; price: number } | null = null;
-  let askResult: { orderId: string; price: number } | null = null;
+  let yesResult: { orderId: string; price: number } | null = null;
+  let noResult: { orderId: string; price: number } | null = null;
 
-  for (const { side, result } of results) {
-    if (side === "BUY") {
+  for (const { token, result } of results) {
+    if (token === "YES") {
       if (result.success && result.orderId) {
-        log(`    Bid placed: ${result.orderId.substring(0, 16)}...`);
-        bidResult = { orderId: result.orderId, price: quotes.bid.price };
+        log(`    BUY YES placed: ${result.orderId.substring(0, 16)}...`);
+        yesResult = { orderId: result.orderId, price: quotes.yesQuote.price };
       } else {
-        log(`    Bid failed: ${result.errorMsg}`);
+        log(`    BUY YES failed: ${result.errorMsg}`);
       }
     } else {
       if (result.success && result.orderId) {
-        log(`    Ask placed: ${result.orderId.substring(0, 16)}...`);
-        askResult = { orderId: result.orderId, price: quotes.ask.price };
+        log(`    BUY NO placed: ${result.orderId.substring(0, 16)}...`);
+        noResult = { orderId: result.orderId, price: quotes.noQuote.price };
       } else {
-        log(`    Ask failed: ${result.errorMsg}`);
+        log(`    BUY NO failed: ${result.errorMsg}`);
       }
     }
   }
 
   return {
-    bid: bidResult,
-    ask: askResult,
+    yesQuote: yesResult,
+    noQuote: noResult,
     lastMidpoint: midpoint,
   };
 }
 
 /**
  * Cancels existing orders for the market.
+ * Cancels orders on BOTH YES and NO tokens.
  * In dry run mode, logs but doesn't cancel.
  */
 export async function cancelExistingOrders(
@@ -204,44 +219,12 @@ export async function cancelExistingOrders(
     log("  [DRY RUN] Would cancel existing orders");
     return;
   }
-  await cancelOrdersForToken(client, config.market.yesTokenId);
-  log("  Cancelled existing orders");
-}
 
-/**
- * Executes the split operation if needed via Safe account.
- * In dry run mode, logs but doesn't execute.
- */
-export async function executeSplitIfNeeded(
-  safe: SafeInstance,
-  safeAddress: string,
-  provider: JsonRpcProvider,
-  config: MarketMakerConfig,
-  splitAmount: number
-): Promise<void> {
-  if (splitAmount <= 0) {
-    return;
-  }
+  // Cancel orders on both tokens in parallel
+  await Promise.all([
+    cancelOrdersForToken(client, config.market.yesTokenId),
+    cancelOrdersForToken(client, config.market.noTokenId),
+  ]);
 
-  log(`  Splitting $${splitAmount.toFixed(2)} USDC into YES+NO tokens via Safe...`);
-
-  if (config.dryRun) {
-    log(`  [DRY RUN] Would split $${splitAmount.toFixed(2)} USDC`);
-    return;
-  }
-
-  // Execute approval + split through Safe (batched for efficiency)
-  const result = await approveAndSplitFromSafe(
-    safe,
-    safeAddress,
-    config.market.conditionId,
-    splitAmount,
-    provider
-  );
-
-  if (!result.success) {
-    throw new Error(`Failed to split USDC: ${result.error}`);
-  }
-
-  log(`  Split complete: ${result.transactionHash}`);
+  log("  Cancelled existing orders (YES + NO)");
 }

@@ -4,25 +4,18 @@
 
 import { log } from "@/utils/helpers.js";
 import { getMidpoint } from "@/utils/orders.js";
-import { runPreFlightChecks } from "@/utils/inventory.js";
 import { PolymarketWebSocket, TrailingDebounce } from "@/utils/websocket.js";
 import { UserWebSocket, tradeEventToFill } from "@/utils/userWebsocket.js";
 import { shouldRebalance } from "../quoter.js";
-import { placeQuotes, cancelExistingOrders, executeSplitIfNeeded } from "../executor.js";
+import { placeQuotes, cancelExistingOrders } from "../executor.js";
 import { createInitialState, createShutdownHandler, registerShutdownHandlers, createPositionTracker } from "../lifecycle.js";
 import type { ClobClient } from "@polymarket/clob-client";
-import type { JsonRpcProvider } from "@ethersproject/providers";
-import type { SafeInstance } from "@/utils/ctf.js";
 import type { MarketMakerConfig, MarketMakerState } from "../types.js";
 import type { PositionTracker } from "@/utils/positionTracker.js";
 
 export interface WebSocketRunnerContext {
   config: MarketMakerConfig;
   client: ClobClient;
-  safe: SafeInstance;
-  safeAddress: string;
-  signerAddress: string;
-  provider: JsonRpcProvider;
 }
 
 /**
@@ -30,13 +23,10 @@ export interface WebSocketRunnerContext {
  * Falls back to polling when WebSocket is disconnected.
  */
 export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<void> {
-  const { config, client, safe, safeAddress, signerAddress, provider } = ctx;
+  const { config, client } = ctx;
 
   // Initialize state
   const state: MarketMakerState = createInitialState();
-
-  // Track inventory check cycles
-  let rebalanceCount = 0;
 
   // Lock to prevent concurrent rebalances
   let isRebalancing = false;
@@ -62,11 +52,10 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<voi
 
     try {
       state.cycleCount++;
-      rebalanceCount++;
       log(`Rebalance #${state.cycleCount} | Midpoint: $${midpoint.toFixed(4)} (via ${source})`);
 
       // Check if we need to rebalance
-      const hasQuotes = state.activeQuotes.bid !== null || state.activeQuotes.ask !== null;
+      const hasQuotes = state.activeQuotes.yesQuote !== null || state.activeQuotes.noQuote !== null;
       const needsRebalance =
         !hasQuotes ||
         shouldRebalance(midpoint, state.activeQuotes.lastMidpoint, config.rebalanceThreshold);
@@ -84,37 +73,13 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<voi
         state.activeQuotes = await placeQuotes(client, config, midpoint, positionTracker);
         state.lastError = null;
       } else {
-        const bidInfo = state.activeQuotes.bid
-          ? `$${state.activeQuotes.bid.price.toFixed(4)}`
+        const yesInfo = state.activeQuotes.yesQuote
+          ? `$${state.activeQuotes.yesQuote.price.toFixed(4)}`
           : "none";
-        const askInfo = state.activeQuotes.ask
-          ? `$${state.activeQuotes.ask.price.toFixed(4)}`
+        const noInfo = state.activeQuotes.noQuote
+          ? `$${state.activeQuotes.noQuote.price.toFixed(4)}`
           : "none";
-        log(`  Quotes still valid (Bid: ${bidInfo}, Ask: ${askInfo})`);
-      }
-
-      // Periodic inventory check (every 10 rebalances if autoSplit enabled)
-      if (config.inventory.autoSplitEnabled && rebalanceCount % 10 === 0) {
-        log("  Checking inventory...");
-        const inventoryCheck = await runPreFlightChecks(
-          client,
-          config.market,
-          config.orderSize,
-          config.inventory,
-          signerAddress,
-          provider
-        );
-
-        if (inventoryCheck.deficit && inventoryCheck.deficit.splitAmount > 0) {
-          log(`  Inventory low, topping up...`);
-          await executeSplitIfNeeded(
-            safe,
-            safeAddress,
-            provider,
-            config,
-            inventoryCheck.deficit.splitAmount
-          );
-        }
+        log(`  Quotes still valid (YES: ${yesInfo}, NO: ${noInfo})`);
       }
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);

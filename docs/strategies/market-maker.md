@@ -4,7 +4,22 @@ A market maker bot that provides two-sided liquidity around the current midpoint
 
 ## Overview
 
-The market maker strategy places simultaneous bid (buy) and ask (sell) orders at calculated spreads from the market midpoint. By maintaining two-sided liquidity within reward-eligible parameters, the bot earns liquidity rewards based on Polymarket's quadratic scoring formula.
+The market maker strategy places BUY orders on both YES and NO tokens at calculated spreads from the market midpoint. By maintaining two-sided liquidity within reward-eligible parameters, the bot earns liquidity rewards based on Polymarket's quadratic scoring formula.
+
+### USDC-Only Mode
+
+The strategy operates in **USDC-only mode** - it places BUY orders on both YES and NO tokens rather than holding tokens upfront. This is economically equivalent to the traditional BUY YES + SELL YES approach but more capital efficient.
+
+**Why this works:** Since Polymarket's YES and NO orderbooks are mirrored (YES price + NO price ≈ 1):
+- BUY NO @ $0.40 is equivalent to SELL YES @ $0.60
+- Both provide the same liquidity and earn the same rewards
+- No need to pre-split USDC into YES+NO tokens via CTF
+
+**Benefits:**
+- No CTF split/merge operations needed during strategy lifecycle
+- Just hold USDC, no need to pre-split into YES+NO tokens
+- Easier on/off boarding to markets
+- Same P&L profile as traditional market making
 
 ## Quick Start
 
@@ -40,8 +55,8 @@ npm run marketMaker
 ┌────────────────────┐    ┌────────────────────┐    ┌────────────────────────────┐
 │  VALIDATE CONFIG   │───▶│   PRINT BANNER     │───▶│   INITIALIZE CLIENT        │
 │  - Token IDs set?  │    │   (show settings)  │    │   - Create auth client     │
-│  - Size >= min?    │    │                    │    │   - Create wallet/signer   │
-│  - Spread valid?   │    │                    │    │   - Get Polygon provider   │
+│  - Size >= min?    │    │                    │    │   - Set up wallet/signer   │
+│  - Spread valid?   │    │                    │    │                            │
 └────────────────────┘    └────────────────────┘    └────────────────────────────┘
                                                                   │
                                                                   ▼
@@ -49,15 +64,14 @@ npm run marketMaker
 │                            PRE-FLIGHT CHECKS                                     │
 ├─────────────────────────────────────────────────────────────────────────────────┤
 │                                                                                  │
-│   ┌──────────────────┐    ┌──────────────────┐    ┌──────────────────────────┐  │
-│   │ CHECK INVENTORY  │───▶│ CHECK BALANCES   │───▶│ AUTO-SPLIT IF NEEDED     │  │
-│   │ - USDC balance   │    │ - YES tokens     │    │ - Approve USDC to CTF    │  │
-│   │ - MATIC for gas  │    │ - NO tokens      │    │ - Split USDC → YES + NO  │  │
-│   └──────────────────┘    │ - Sufficient?    │    └──────────────────────────┘  │
-│                           └──────────────────┘                                   │
+│   ┌──────────────────────────────────────────────────────────────────────────┐  │
+│   │                        CHECK USDC BALANCE                                 │  │
+│   │   - Minimum: 2x orderSize (to place both YES and NO orders)              │  │
+│   │   - Warning if < 5x orderSize (low buffer for multiple cycles)           │  │
+│   └──────────────────────────────────────────────────────────────────────────┘  │
 │                                                                                  │
-│   If pre-flight fails → EXIT with error                                          │
-│   If pre-flight passes → Continue to main loop                                   │
+│   If USDC insufficient → EXIT with error                                         │
+│   If USDC sufficient → Continue to main loop                                     │
 └─────────────────────────────────────────────────────────────────────────────────┘
                                       │
                                       ▼
@@ -68,7 +82,7 @@ npm run marketMaker
 │   ┌──────────────────────────────────────────────────────────────────────────┐  │
 │   │                        WebSocket Connection                               │  │
 │   │   Connect to: wss://ws-subscriptions-clob.polymarket.com/ws/market       │  │
-│   │   Subscribe to: token ID with custom_feature_enabled: true               │  │
+│   │   Subscribe to: YES token ID with custom_feature_enabled: true           │  │
 │   └──────────────────────────────────────────────────────────────────────────┘  │
 │                                      │                                           │
 │                                      ▼                                           │
@@ -85,20 +99,16 @@ npm run marketMaker
 │   │  Fallback: If WebSocket disconnects → Poll REST API every 30s            │  │
 │   └──────────────────────────────────────────────────────────────────────────┘  │
 │                                                                                  │
-│   ┌──────────────────────────────────────────────────────────────────────────┐  │
-│   │  Periodic: Inventory check (every 10 rebalances if autoSplit on)         │  │
-│   └──────────────────────────────────────────────────────────────────────────┘  │
-│                                                                                  │
 │   On SIGINT/SIGTERM: Disconnect WebSocket, cancel all orders, exit gracefully   │
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Quote Generation
 
-The bot generates quotes symmetrically around the midpoint:
+The bot generates BUY quotes on both YES and NO tokens symmetrically around the midpoint:
 
 ```
-           Max Spread (e.g., 3c)                 Max Spread (e.g., 3c)
+            Max Spread (e.g., 3c)                 Max Spread (e.g., 3c)
         ◄───────────────────────►             ◄───────────────────────►
 
         ┌─────────────────────────────────────────────────────────────┐
@@ -106,17 +116,17 @@ The bot generates quotes symmetrically around the midpoint:
    $0.47│▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                                           │ Not eligible
         │                 ▓                                           │ (outside max spread)
         │                 ▓                                           │
-   $0.48│                 ├─────── BID @ $0.485 ─────────┐            │
-        │                 │       (1.5c from mid)        │            │ ◄── Reward eligible
-        │                 │                              │            │     zone
-   $0.49│                 │                              │            │
-        │                 │                              │            │
-   $0.50│─────────────────┼────── MIDPOINT ──────────────┼────────────│
-        │                 │                              │            │
-   $0.51│                 │                              │            │
-        │                 │                              │            │
-   $0.52│                 └─────── ASK @ $0.515 ─────────┤            │ ◄── Reward eligible
-        │                                                │            │     zone
+   $0.48│                 ├─── BUY YES @ $0.485 ───────────┐          │
+        │                 │    (1.5c from mid)             │          │ ◄── Reward eligible
+        │                 │                                │          │     zone
+   $0.49│                 │                                │          │
+        │                 │                                │          │
+   $0.50│─────────────────┼────── MIDPOINT ────────────────┼──────────│
+        │                 │                                │          │
+   $0.51│                 │                                │          │
+        │                 │    BUY NO @ $0.485             │          │
+   $0.52│                 └─── (= SELL YES @ $0.515) ──────┤          │ ◄── Reward eligible
+        │                      (1.5c from mid)             │          │     zone
    $0.53│                                                ▓            │
         │                                           ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓│ Not eligible
         │                                                             │
@@ -125,6 +135,16 @@ The bot generates quotes symmetrically around the midpoint:
         │◄────── spreadPercent × maxSpread ──────►│
                      (e.g., 50% × 3c = 1.5c)
 ```
+
+**Price Mirroring:**
+- YES quote: BUY YES @ (midpoint - offset)
+- NO quote: BUY NO @ (1 - (midpoint + offset))
+
+Example with midpoint = 0.50, offset = 0.015 (1.5c):
+- BUY YES @ 0.485
+- BUY NO @ 1 - 0.515 = 0.485
+
+Both orders are placed at 0.485 but on different tokens!
 
 ### Rebalance Logic
 
@@ -228,7 +248,7 @@ export const MARKET_CONFIG: MarketParams = {
   // NO token ID (second outcome)  
   noTokenId: "10842869574567893452345678901234...",
   
-  // Condition ID for CTF operations (split/merge)
+  // Condition ID (for position tracking)
   conditionId: "0x1234567890abcdef...",
   
   // Tick size (minimum price increment)
@@ -251,23 +271,14 @@ export const STRATEGY_OVERRIDES = {
   // Spread as % of maxSpread (0.5 = 50% = place at half max spread)
   spreadPercent: 0.5,
   
-  // How often to check/refresh quotes (ms)
+  // How often to check/refresh quotes (ms) - polling mode only
   refreshIntervalMs: 30_000,
   
   // Rebalance if midpoint moves by this amount
   rebalanceThreshold: 0.005,  // 0.5 cents
-};
-
-// Inventory management settings
-export const DEFAULT_INVENTORY_PARAMS: InventoryConfig = {
-  // Minimum token balance per side (YES and NO)
-  minTokenBalance: 50,
   
-  // Auto-split USDC into tokens if inventory is low
-  autoSplitEnabled: true,
-  
-  // Reserve multiplier for USDC (keeps extra for gas/emergencies)
-  usdcReserveMultiplier: 1.2,
+  // Maximum net position exposure (blocks one side when exceeded)
+  maxNetExposure: 100,
 };
 
 // Set to false when ready for live trading
@@ -281,21 +292,6 @@ The bot starts in **dry-run mode** by default (`dryRun: true`). In this mode:
 - Orders are logged but NOT actually placed
 - Useful for testing configuration and observing behavior
 - Set `dryRun: false` in config.ts for live trading
-
-### Inventory Management
-
-The bot now supports **two-sided inventory** using CTF `splitPosition()`:
-
-1. **Pre-flight checks**: Before starting, the bot verifies:
-   - Sufficient USDC balance
-   - Sufficient YES and NO token balances
-   - Minimum MATIC for gas fees
-
-2. **Auto-split**: If `autoSplitEnabled: true` and token inventory is low:
-   - Bot automatically splits USDC into YES+NO tokens
-   - Amount calculated based on `minTokenBalance` and `usdcReserveMultiplier`
-
-3. **Periodic checks**: Every 10 cycles, inventory is re-checked
 
 ### Finding Market Parameters
 
@@ -322,6 +318,7 @@ npm run selectMarket -- nfc-south-winner-11 0 # Generate config for market 0
 | `spreadPercent` | 0.5 | Quote at X% of max spread from midpoint |
 | `refreshIntervalMs` | 30000 | Check/refresh quotes every N ms (polling mode only) |
 | `rebalanceThreshold` | 0.005 | Rebalance if midpoint moves by N (0.5 cents) |
+| `maxNetExposure` | 100 | Maximum net position before blocking one side |
 | `dryRun` | true | Simulate orders without placing them |
 
 ### WebSocket Parameters
@@ -335,13 +332,20 @@ npm run selectMarket -- nfc-south-winner-11 0 # Generate config for market 0
 | `webSocket.reconnectDelayMs` | 1000 | Initial reconnect delay (exponential backoff) |
 | `webSocket.maxReconnectDelayMs` | 30000 | Maximum reconnect delay |
 
-### Inventory Parameters
+### Position Limits
+
+The bot tracks positions and enforces net exposure limits:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `minTokenBalance` | 50 | Minimum YES/NO tokens to hold per side |
-| `autoSplitEnabled` | true | Auto-split USDC into tokens if low |
-| `usdcReserveMultiplier` | 1.2 | Keep 20% extra USDC as reserve |
+| `maxNetExposure` | 100 | Maximum YES - NO position before blocking |
+| `warnThreshold` | 0.7 | Warn when at 70% of limit |
+
+**How it works:**
+- Net exposure = YES tokens - NO tokens
+- Positive = long YES, Negative = long NO
+- Blocks BUY YES when exposure >= maxNetExposure
+- Blocks BUY NO when exposure <= -maxNetExposure
 
 ### Tuning Guidelines
 
@@ -350,6 +354,7 @@ npm run selectMarket -- nfc-south-winner-11 0 # Generate config for market 0
 spreadPercent: 0.3,      // Closer to midpoint = more rewards
 refreshIntervalMs: 15000, // More frequent updates
 orderSize: 50,           // Larger orders
+maxNetExposure: 200,     // Higher position limits
 ```
 
 **Conservative (lower rewards, lower risk):**
@@ -357,6 +362,7 @@ orderSize: 50,           // Larger orders
 spreadPercent: 0.8,      // Farther from midpoint = safer
 refreshIntervalMs: 60000, // Less frequent updates
 orderSize: 25,           // Smaller orders
+maxNetExposure: 50,      // Tighter position limits
 ```
 
 ## Architecture
@@ -365,12 +371,12 @@ orderSize: 25,           // Smaller orders
 
 ```
 src/strategies/marketMaker/
-├── index.ts       # Main entry point (thin orchestrator, ~110 lines)
+├── index.ts       # Main entry point (thin orchestrator)
 ├── config.ts      # Strategy configuration (EDIT THIS!)
 ├── types.ts       # TypeScript type definitions
-├── quoter.ts      # Quote generation logic
+├── quoter.ts      # Quote generation logic (BUY YES + BUY NO)
 ├── lifecycle.ts   # Startup/shutdown, validation, banner
-├── executor.ts    # Order placement, cancellation, CTF splits
+├── executor.ts    # Order placement and cancellation
 └── modes/         # Execution mode implementations
     ├── index.ts       # Mode exports
     ├── websocket.ts   # WebSocket real-time runner
@@ -386,8 +392,8 @@ src/strategies/marketMaker/
 │                                                                          │
 │  1. Validate config (lifecycle.ts)                                       │
 │  2. Print banner (lifecycle.ts)                                          │
-│  3. Initialize clients (authClient, Safe)                                │
-│  4. Run pre-flight checks (inventory.ts)                                 │
+│  3. Initialize authenticated client                                      │
+│  4. Check USDC balance                                                   │
 │  5. Delegate to mode runner ──┬──▶ modes/websocket.ts (default)          │
 │                               └──▶ modes/polling.ts   (fallback)         │
 │                                                                          │
@@ -400,7 +406,7 @@ src/strategies/marketMaker/
 │              │           │              │           │              │
 │ validateConfig           │ placeQuotes  │           │generateQuotes│
 │ printBanner  │           │ cancelOrders │           │shouldRebalance
-│ createShutdown           │ executeSplit │           │estimateScore │
+│ createShutdown           │              │           │estimateScore │
 └──────────────┘           └──────────────┘           └──────────────┘
                                     │
                                     ▼
@@ -411,8 +417,7 @@ src/strategies/marketMaker/
                            │ ● orders.ts              │
                            │ ● rewards.ts             │
                            │ ● websocket.ts           │
-                           │ ● inventory.ts           │
-                           │ ● ctf.ts                 │
+                           │ ● positionTracker.ts     │
                            └──────────────────────────┘
 ```
 
@@ -422,9 +427,10 @@ src/strategies/marketMaker/
 ┌─────────────┐      ┌─────────────┐      ┌─────────────┐
 │   Config    │─────▶│   Quoter    │─────▶│  Executor   │
 │             │      │             │      │             │
-│ tokenId     │      │ Calculates  │      │ Places BID  │
-│ orderSize   │      │ bid/ask     │      │ and ASK     │
-│ spreadPct   │      │ prices      │      │ orders      │
+│ yesTokenId  │      │ Calculates  │      │ Places BUY  │
+│ noTokenId   │      │ YES + NO    │      │ orders on   │
+│ orderSize   │      │ buy prices  │      │ both tokens │
+│ spreadPct   │      │             │      │             │
 └─────────────┘      └─────────────┘      └─────────────┘
                             │
                             ▼
@@ -441,7 +447,7 @@ src/strategies/marketMaker/
 
 ```
 ============================================================
-  MARKET MAKER BOT
+  MARKET MAKER BOT - USDC-Only Mode
 ============================================================
   YES Token: 75710865397670382800...
   NO Token:  10842869574567893452...
@@ -455,62 +461,45 @@ src/strategies/marketMaker/
 ============================================================
   Press Ctrl+C to stop
 
-[12:00:00] Running pre-flight checks...
-[12:00:01] Inventory Status:
-           USDC: $250.00
-           YES:  100 tokens
-           NO:   100 tokens
-           MATIC: 0.15
+[12:00:00] Checking USDC balance...
+[12:00:01] USDC Balance: $250.00 (minimum: $50.00)
 [12:00:01] Pre-flight checks passed
 [12:00:01] Initializing authenticated client...
 [12:00:02] Client initialized successfully
+[12:00:02] Connecting to WebSocket...
+[12:00:02] WebSocket connected
 [12:00:02] Cycle #1 | Midpoint: $0.4500
-[12:00:02]   No active quotes, rebalancing...
+[12:00:02]   No active quotes, placing new orders...
 [12:00:02]   Placing quotes:
-[12:00:02]     BUY 25 @ $0.4275 (2.2c from mid)
-[12:00:02]     SELL 25 @ $0.4725 (2.2c from mid)
-[12:00:02]     Estimated scores: Bid=14.2, Ask=14.2
-[12:00:02]   [DRY RUN] Would place bid: BUY 25 @ $0.4275
-[12:00:02]   [DRY RUN] Would place ask: SELL 25 @ $0.4725
+[12:00:02]     BUY YES 25 @ $0.4275 (2.2c from mid)
+[12:00:02]     BUY NO 25 @ $0.5275 (= SELL YES @ $0.4725, 2.2c from mid)
+[12:00:02]     Estimated scores: YES=14.2, NO=14.2
+[12:00:02]   [DRY RUN] Would place: BUY YES 25 @ $0.4275
+[12:00:02]   [DRY RUN] Would place: BUY NO 25 @ $0.5275
 [12:00:32] Cycle #2 | Midpoint: $0.4510
-[12:00:32]   Quotes still valid (Bid: $0.4275, Ask: $0.4725)
+[12:00:32]   Quotes still valid (YES: $0.4275, NO: $0.5275)
 ...
 
 ^C
 [12:05:30] Shutting down...
+[12:05:30] Cancelling orders on YES token...
+[12:05:30] Cancelling orders on NO token...
 [12:05:30] [DRY RUN] Would cancel all orders
 
 Goodbye!
 ```
 
-### Live Trading Session
-
-```
-[12:00:00] Running pre-flight checks...
-[12:00:01] Inventory Status:
-           USDC: $50.00
-           YES:  10 tokens
-           NO:   10 tokens
-           MATIC: 0.15
-[12:00:01] WARNING: Insufficient YES tokens (10 < 50 required)
-[12:00:01] WARNING: Insufficient NO tokens (10 < 50 required)
-[12:00:01] Auto-split enabled, splitting $100 USDC into tokens...
-[12:00:05] Split successful: +100 YES, +100 NO tokens
-[12:00:05] Pre-flight checks passed
-...
-```
-
 ## Risks and Considerations
 
-### Inventory Risk
-- If the market moves directionally, you may accumulate a position
-- Monitor your position and adjust accordingly
-- **Mitigated**: Bot now starts with two-sided inventory (YES+NO tokens)
+### Position Risk
+- If one side fills more than the other, you accumulate a position
+- Monitor your net exposure and adjust accordingly
+- **Mitigated**: Position tracker blocks one side when limits exceeded
 
 ### Execution Risk
 - Orders may get filled between refresh cycles
 - Partial fills may leave you with one-sided exposure
-- **Mitigated**: Pre-flight checks verify sufficient inventory before starting
+- **Mitigated**: WebSocket mode provides ~50ms reaction time
 
 ### Price Impact
 - Larger order sizes may move the market
@@ -520,11 +509,6 @@ Goodbye!
 - Network issues may prevent order cancellation
 - Always monitor the bot while running
 - **Mitigated**: Dry-run mode allows testing without real orders
-
-### Gas Costs
-- CTF `splitPosition()` operations require MATIC for gas
-- Bot checks for minimum MATIC balance (0.01) before starting
-- Keep sufficient MATIC in your wallet for operations
 
 ## Related Documentation
 

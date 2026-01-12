@@ -41,7 +41,7 @@ export function validateConfig(config: MarketMakerConfig): void {
  */
 export function printBanner(config: MarketMakerConfig): void {
   console.log("\n" + "=".repeat(60));
-  console.log("  MARKET MAKER BOT");
+  console.log("  MARKET MAKER BOT (USDC-Only Mode)");
   if (config.dryRun) {
     console.log("  *** DRY RUN MODE - No real orders will be placed ***");
   }
@@ -53,8 +53,7 @@ export function printBanner(config: MarketMakerConfig): void {
   console.log(`  Rebalance Threshold: ${config.rebalanceThreshold * 100} cents`);
   console.log(`  Tick Size: ${config.market.tickSize}`);
   console.log(`  Negative Risk: ${config.market.negRisk}`);
-  console.log(`  Auto-Split: ${config.inventory.autoSplitEnabled}`);
-  console.log(`  Execution: Safe (Gnosis Safe) account`);
+  console.log(`  Position Limit: ±${config.positionLimits.maxNetExposure} net exposure`);
   console.log("-".repeat(60));
   if (config.webSocket.enabled) {
     console.log(`  Mode: WebSocket (real-time)`);
@@ -74,7 +73,7 @@ export function printBanner(config: MarketMakerConfig): void {
 export function createInitialState(): MarketMakerState {
   return {
     running: true,
-    activeQuotes: { bid: null, ask: null, lastMidpoint: 0 },
+    activeQuotes: { yesQuote: null, noQuote: null, lastMidpoint: 0 },
     cycleCount: 0,
     lastError: null,
   };
@@ -101,8 +100,12 @@ export function createShutdownHandler(
     try {
       if (!config.dryRun) {
         log("Cancelling all orders...");
-        await cancelOrdersForToken(client, config.market.yesTokenId);
-        log("All orders cancelled");
+        // Cancel orders on both YES and NO tokens
+        await Promise.all([
+          cancelOrdersForToken(client, config.market.yesTokenId),
+          cancelOrdersForToken(client, config.market.noTokenId),
+        ]);
+        log("All orders cancelled (YES + NO)");
       } else {
         log("[DRY RUN] Would cancel all orders");
       }

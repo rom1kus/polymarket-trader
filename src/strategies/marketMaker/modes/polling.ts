@@ -4,29 +4,22 @@
 
 import { sleep, log } from "@/utils/helpers.js";
 import { getMidpoint } from "@/utils/orders.js";
-import { runPreFlightChecks } from "@/utils/inventory.js";
 import { shouldRebalance } from "../quoter.js";
-import { placeQuotes, cancelExistingOrders, executeSplitIfNeeded } from "../executor.js";
+import { placeQuotes, cancelExistingOrders } from "../executor.js";
 import { createInitialState, createShutdownHandler, registerShutdownHandlers } from "../lifecycle.js";
 import type { ClobClient } from "@polymarket/clob-client";
-import type { JsonRpcProvider } from "@ethersproject/providers";
-import type { SafeInstance } from "@/utils/ctf.js";
 import type { MarketMakerConfig } from "../types.js";
 
 export interface PollingRunnerContext {
   config: MarketMakerConfig;
   client: ClobClient;
-  safe: SafeInstance;
-  safeAddress: string;
-  signerAddress: string;
-  provider: JsonRpcProvider;
 }
 
 /**
  * Runs the market maker with traditional polling (no WebSocket).
  */
 export async function runWithPolling(ctx: PollingRunnerContext): Promise<void> {
-  const { config, client, safe, safeAddress, signerAddress, provider } = ctx;
+  const { config, client } = ctx;
 
   // Initialize state
   const state = createInitialState();
@@ -45,7 +38,7 @@ export async function runWithPolling(ctx: PollingRunnerContext): Promise<void> {
       log(`Cycle #${state.cycleCount} | Midpoint: $${midpoint.toFixed(4)}`);
 
       // 2. Check if we need to rebalance
-      const hasQuotes = state.activeQuotes.bid !== null || state.activeQuotes.ask !== null;
+      const hasQuotes = state.activeQuotes.yesQuote !== null || state.activeQuotes.noQuote !== null;
       const needsRebalance =
         !hasQuotes ||
         shouldRebalance(midpoint, state.activeQuotes.lastMidpoint, config.rebalanceThreshold);
@@ -63,37 +56,13 @@ export async function runWithPolling(ctx: PollingRunnerContext): Promise<void> {
         state.activeQuotes = await placeQuotes(client, config, midpoint);
         state.lastError = null;
       } else {
-        const bidInfo = state.activeQuotes.bid
-          ? `$${state.activeQuotes.bid.price.toFixed(4)}`
+        const yesInfo = state.activeQuotes.yesQuote
+          ? `$${state.activeQuotes.yesQuote.price.toFixed(4)}`
           : "none";
-        const askInfo = state.activeQuotes.ask
-          ? `$${state.activeQuotes.ask.price.toFixed(4)}`
+        const noInfo = state.activeQuotes.noQuote
+          ? `$${state.activeQuotes.noQuote.price.toFixed(4)}`
           : "none";
-        log(`  Quotes still valid (Bid: ${bidInfo}, Ask: ${askInfo})`);
-      }
-
-      // 5. Periodic inventory check (every 10 cycles if autoSplit enabled)
-      if (config.inventory.autoSplitEnabled && state.cycleCount % 10 === 0) {
-        log("  Checking inventory...");
-        const inventoryCheck = await runPreFlightChecks(
-          client,
-          config.market,
-          config.orderSize,
-          config.inventory,
-          signerAddress,
-          provider
-        );
-
-        if (inventoryCheck.deficit && inventoryCheck.deficit.splitAmount > 0) {
-          log(`  Inventory low, topping up...`);
-          await executeSplitIfNeeded(
-            safe,
-            safeAddress,
-            provider,
-            config,
-            inventoryCheck.deficit.splitAmount
-          );
-        }
+        log(`  Quotes still valid (YES: ${yesInfo}, NO: ${noInfo})`);
       }
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
@@ -101,7 +70,7 @@ export async function runWithPolling(ctx: PollingRunnerContext): Promise<void> {
       state.lastError = errorMsg;
     }
 
-    // 6. Wait for next cycle
+    // 5. Wait for next cycle
     await sleep(config.refreshIntervalMs);
   }
 }

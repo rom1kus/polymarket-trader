@@ -219,26 +219,40 @@ export function calculateEarningPercentage(
 }
 
 /**
- * Fetches reward parameters for a market including current midpoint.
+ * Fetches reward parameters for a market including current midpoint for all tokens.
  *
- * Combines Gamma API reward params with CLOB midpoint data.
+ * Combines Gamma API reward params with CLOB midpoint data for each token.
  *
  * @param client - Authenticated CLOB client
- * @param tokenId - Token ID for the market
- * @returns Market reward parameters with midpoint
+ * @param tokenIds - Token IDs for the market (YES and NO tokens)
+ * @param conditionId - Condition ID for the market
+ * @returns Market reward parameters with midpoints for all tokens
  */
 export async function getMarketRewardParamsWithMidpoint(
   client: ClobClient,
-  tokenId: string
+  tokenIds: string[],
+  conditionId: string
 ): Promise<MarketRewardParamsWithMidpoint> {
-  const [gammaParams, midpoint] = await Promise.all([
-    fetchMarketRewardParams(tokenId),
-    getMidpoint(client, tokenId),
+  const primaryTokenId = tokenIds[0];
+
+  // Fetch gamma params and midpoints for all tokens in parallel
+  const [gammaParams, ...midpoints] = await Promise.all([
+    fetchMarketRewardParams(primaryTokenId),
+    ...tokenIds.map((tid) => getMidpoint(client, tid)),
   ]);
+
+  // Build midpoint map for each token
+  const midpointByToken = new Map<string, number>();
+  tokenIds.forEach((tid, index) => {
+    midpointByToken.set(tid, midpoints[index]);
+  });
 
   return {
     ...gammaParams,
-    midpoint,
+    tokenIds,
+    conditionId,
+    midpoint: midpoints[0], // Primary token midpoint for backward compatibility
+    midpointByToken,
   };
 }
 
@@ -255,7 +269,11 @@ export function evaluateOrderReward(
 ): OrderRewardStatus {
   const price = parseFloat(order.price);
   const size = parseFloat(order.original_size) - parseFloat(order.size_matched);
-  const spreadFromMid = calculateSpreadCents(price, params.midpoint);
+
+  // Use the midpoint specific to this order's token
+  const tokenMidpoint =
+    params.midpointByToken.get(order.asset_id) ?? params.midpoint;
+  const spreadFromMid = calculateSpreadCents(price, tokenMidpoint);
 
   let eligible = true;
   let reason: string | undefined;
@@ -289,9 +307,16 @@ export function evaluateOrderReward(
 }
 
 /**
- * Checks reward eligibility for a group of orders on the same token.
+ * Checks reward eligibility for a group of orders on the same market (conditionId).
  *
- * @param orders - Array of open orders for a single token
+ * When orders span multiple tokens (YES/NO), the order's effective "market side"
+ * is determined by both its side (BUY/SELL) and which token it's on:
+ * - BUY on YES token (or first token) = bid side
+ * - SELL on YES token (or first token) = ask side
+ * - BUY on NO token (or second token) = ask side (mirrored)
+ * - SELL on NO token (or second token) = bid side (mirrored)
+ *
+ * @param orders - Array of open orders for a market (may span YES and NO tokens)
  * @param params - Market reward parameters with midpoint
  * @param scalingFactor - Single-sided penalty factor (default 3.0)
  * @returns Complete reward check result
@@ -302,16 +327,27 @@ export function checkOrdersRewardEligibility(
   scalingFactor: number = DEFAULT_SCALING_FACTOR
 ): RewardCheckResult {
   const orderStatuses: OrderRewardStatus[] = [];
-  let totalBuyScore = 0;
-  let totalSellScore = 0;
+  let totalBuyScore = 0; // Bid side (YES bids + NO asks)
+  let totalSellScore = 0; // Ask side (YES asks + NO bids)
   let hasBuySide = false;
   let hasSellSide = false;
+
+  // Determine the primary token (first token is typically YES)
+  const primaryTokenId = params.tokenIds[0];
 
   for (const order of orders) {
     const status = evaluateOrderReward(order, params);
     orderStatuses.push(status);
 
-    if (order.side === "BUY") {
+    // Determine effective market side based on token and order side
+    // For primary token (YES): BUY = bid side, SELL = ask side
+    // For secondary token (NO): BUY = ask side (mirrored), SELL = bid side (mirrored)
+    const isPrimaryToken = order.asset_id === primaryTokenId;
+    const isBidSide =
+      (isPrimaryToken && order.side === "BUY") ||
+      (!isPrimaryToken && order.side === "SELL");
+
+    if (isBidSide) {
       totalBuyScore += status.score;
       if (status.eligible) hasBuySide = true;
     } else {
@@ -365,36 +401,60 @@ export function checkOrdersRewardEligibility(
 /**
  * Checks reward eligibility for all open orders.
  *
- * Groups orders by token and evaluates each group.
+ * Groups orders by conditionId (market) and evaluates each group.
+ * This combines orders from both YES and NO tokens into a single result
+ * per market, matching how Polymarket reports earnings.
  *
  * @param client - Authenticated CLOB client
  * @param orders - Array of all open orders
- * @param tokenId - Optional filter for specific token
- * @returns Array of reward check results (one per token)
+ * @param conditionId - Optional filter for specific market
+ * @returns Array of reward check results (one per market/conditionId)
  */
 export async function checkAllOrdersRewardEligibility(
   client: ClobClient,
   orders: OpenOrder[],
-  tokenId?: string
+  conditionId?: string
 ): Promise<RewardCheckResult[]> {
-  // Group orders by token ID
-  const ordersByToken = new Map<string, OpenOrder[]>();
-  for (const order of orders) {
-    const tid = order.asset_id;
-    if (tokenId && tid !== tokenId) continue;
+  // First pass: collect unique tokenIds and fetch their conditionIds
+  const tokenIds = [...new Set(orders.map((o) => o.asset_id))];
 
-    if (!ordersByToken.has(tid)) {
-      ordersByToken.set(tid, []);
+  // Fetch order books to get conditionId for each token (with caching)
+  const tokenToCondition = new Map<string, string>();
+  for (const tid of tokenIds) {
+    const orderBook = await client.getOrderBook(tid);
+    tokenToCondition.set(tid, orderBook.market); // orderBook.market is conditionId
+  }
+
+  // Group orders by conditionId
+  const ordersByCondition = new Map<string, OpenOrder[]>();
+  const tokensByCondition = new Map<string, Set<string>>();
+
+  for (const order of orders) {
+    const cid = tokenToCondition.get(order.asset_id)!;
+    if (conditionId && cid !== conditionId) continue;
+
+    if (!ordersByCondition.has(cid)) {
+      ordersByCondition.set(cid, []);
+      tokensByCondition.set(cid, new Set());
     }
-    ordersByToken.get(tid)!.push(order);
+    ordersByCondition.get(cid)!.push(order);
+    tokensByCondition.get(cid)!.add(order.asset_id);
   }
 
   const results: RewardCheckResult[] = [];
 
-  // Process each token's orders
-  for (const [tid, tokenOrders] of ordersByToken) {
-    const params = await getMarketRewardParamsWithMidpoint(client, tid);
-    const result = checkOrdersRewardEligibility(tokenOrders, params);
+  // Process each conditionId's orders
+  for (const [cid, conditionOrders] of ordersByCondition) {
+    const conditionTokenIds = [...tokensByCondition.get(cid)!];
+
+    // Fetch params using first token (reward params are shared across tokens in same market)
+    const params = await getMarketRewardParamsWithMidpoint(
+      client,
+      conditionTokenIds,
+      cid
+    );
+
+    const result = checkOrdersRewardEligibility(conditionOrders, params);
     results.push(result);
   }
 

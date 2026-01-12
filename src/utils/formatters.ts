@@ -428,8 +428,11 @@ export function formatRewardResultsWithEarnings(
   const lines: string[] = [];
 
   for (const result of results) {
+    const tokenCount = result.market.tokenIds.length;
+    const tokenLabel = tokenCount > 1 ? `(${tokenCount} tokens)` : "(1 token)";
+
     lines.push("\n" + "=".repeat(70));
-    lines.push(`MARKET: ${result.market.tokenId.substring(0, 20)}...`);
+    lines.push(`MARKET: ${result.conditionId} ${tokenLabel}`);
     lines.push("=".repeat(70));
     lines.push(`  Midpoint: ${(result.market.midpoint * 100).toFixed(2)}%`);
     lines.push(`  Min Size for Rewards: ${result.market.rewardsMinSize} shares`);
@@ -452,9 +455,9 @@ export function formatRewardResultsWithEarnings(
 
     lines.push("\n  SCORES:");
     lines.push("  " + "-".repeat(66));
-    lines.push(`  Your BUY Score:   ${result.totalBuyScore.toFixed(2)}`);
-    lines.push(`  Your SELL Score:  ${result.totalSellScore.toFixed(2)}`);
-    lines.push(`  Your Q_min:       ${result.effectiveScore.toFixed(2)}`);
+    lines.push(`  Your Bid Side Score:  ${result.totalBuyScore.toFixed(2)}`);
+    lines.push(`  Your Ask Side Score:  ${result.totalSellScore.toFixed(2)}`);
+    lines.push(`  Your Q_min:           ${result.effectiveScore.toFixed(2)}`);
 
     lines.push("");
     lines.push(`  Order Book BID Score: ${result.orderBookBidScore.toFixed(2)}`);

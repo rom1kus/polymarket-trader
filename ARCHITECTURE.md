@@ -445,25 +445,13 @@ Market maker bot for earning Polymarket liquidity rewards.
 > **Full documentation:** [docs/strategies/market-maker.md](docs/strategies/market-maker.md)
 
 **Files:**
-- `index.ts` - Main entry point (thin orchestrator ~110 lines)
+- `index.ts` - Main entry point (thin orchestrator)
 - `config.ts` - Strategy configuration (edit this to set your market!)
-- `types.ts` - Strategy-specific types (MarketMakerConfig, WebSocketConfig, ActiveQuotes, etc.)
-- `quoter.ts` - Quote generation logic using shared reward utilities
-- `lifecycle.ts` - Startup/shutdown handlers, config validation, banner printing, position tracker init
-- `executor.ts` - Order placement with position limit checking, cancellation, and CTF split execution
-- `modes/` - Execution mode implementations
-  - `index.ts` - Mode exports barrel file
-  - `websocket.ts` - WebSocket real-time runner with fallback polling and user channel
-  - `polling.ts` - Traditional REST API polling runner
-
-**Modes:**
-- **WebSocket mode (default)**: Real-time price updates via WebSocket with ~50ms reaction time
-- **Polling mode**: Traditional REST-based polling (fallback when WebSocket disconnects)
-
-**Position Limits:**
-- Tracks YES/NO positions via user WebSocket fill notifications
-- Blocks one side when net exposure exceeds configured limits
-- Persists fills to `./data/` for reconciliation on restart
+- `types.ts` - Strategy-specific types
+- `quoter.ts` - Quote generation logic
+- `lifecycle.ts` - Startup/shutdown handlers, config validation, banner printing
+- `executor.ts` - Order placement and cancellation
+- `modes/` - Execution mode implementations (WebSocket and polling)
 
 ## Environment Variables
 
@@ -569,4 +557,4 @@ The Safe SDK (`@safe-global/protocol-kit`) handles:
 - All utilities in `src/utils/`
 
 ---
-*Last updated: Added fill tracking, position limits, and user WebSocket for real-time trade notifications*
+*Last updated: Refactored market maker strategy*

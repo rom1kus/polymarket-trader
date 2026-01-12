@@ -3,11 +3,9 @@
  */
 
 import type { MarketParams } from "@/types/strategy.js";
-import type { InventoryConfig } from "@/types/inventory.js";
 import type { PositionLimitsConfig } from "@/types/fills.js";
 
 // Re-export for convenience
-export type { InventoryConfig } from "@/types/inventory.js";
 export type { PositionLimitsConfig } from "@/types/fills.js";
 
 /**
@@ -58,6 +56,9 @@ export interface WebSocketConfig {
 
 /**
  * Configuration for the market maker strategy.
+ *
+ * The strategy operates in USDC-only mode - it places BUY orders on both
+ * YES and NO tokens rather than holding tokens upfront.
  */
 export interface MarketMakerConfig {
   /** Market parameters (tokens, condition, tick size, etc.) */
@@ -70,14 +71,12 @@ export interface MarketMakerConfig {
   refreshIntervalMs: number;
   /** Midpoint change threshold to trigger rebalance (e.g., 0.005 = 0.5 cents) */
   rebalanceThreshold: number;
-  /** Inventory management settings */
-  inventory: InventoryConfig;
   /** Position limits for risk management */
   positionLimits: PositionLimitsConfig;
   /** WebSocket configuration for real-time price updates */
   webSocket: WebSocketConfig;
   /**
-   * Dry run mode - simulate without placing real orders or executing splits.
+   * Dry run mode - simulate without placing real orders.
    * Set to true for safe testing.
    */
   dryRun: boolean;
@@ -93,20 +92,33 @@ export interface QuoteLevel {
 }
 
 /**
- * Generated quotes for market making
+ * Generated quotes for market making.
+ *
+ * The strategy places BUY orders on both YES and NO tokens:
+ * - yesQuote: BUY YES at (midpoint - offset)
+ * - noQuote: BUY NO at (1 - (midpoint + offset)) - mirrored price
+ *
+ * This is economically equivalent to the old bid/ask approach but
+ * doesn't require holding YES/NO tokens upfront - only USDC.
  */
 export interface Quotes {
-  bid: QuoteLevel;
-  ask: QuoteLevel;
+  /** BUY YES order at bid price */
+  yesQuote: QuoteLevel;
+  /** BUY NO order at mirrored ask price */
+  noQuote: QuoteLevel;
   midpoint: number;
 }
 
 /**
- * Tracks currently active orders
+ * Tracks currently active orders.
+ *
+ * Both orders are BUY orders on different tokens:
+ * - yesQuote: BUY YES order
+ * - noQuote: BUY NO order
  */
 export interface ActiveQuotes {
-  bid: { orderId: string; price: number } | null;
-  ask: { orderId: string; price: number } | null;
+  yesQuote: { orderId: string; price: number } | null;
+  noQuote: { orderId: string; price: number } | null;
   lastMidpoint: number;
 }
 

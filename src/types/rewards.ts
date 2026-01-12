@@ -29,14 +29,20 @@ export interface OpenOrder {
  * Combines Gamma API reward params with CLOB midpoint.
  */
 export interface MarketRewardParamsWithMidpoint {
-  /** Token ID for the market */
+  /** Token ID for the market (first token if multiple) */
   tokenId: string;
+  /** All token IDs for this market (YES and NO) */
+  tokenIds: string[];
+  /** Condition ID for the market */
+  conditionId: string;
   /** Minimum order size for reward eligibility (in shares) */
   rewardsMinSize: number;
   /** Maximum spread from midpoint for rewards (in cents) */
   rewardsMaxSpread: number;
-  /** Current midpoint from CLOB API */
+  /** Current midpoint from CLOB API (for primary token) */
   midpoint: number;
+  /** Midpoint for each token (tokenId -> midpoint) */
+  midpointByToken: Map<string, number>;
 }
 
 /**
