@@ -165,6 +165,7 @@ export interface MarketWithRewards {
 
 /**
  * Score breakdown for market attractiveness.
+ * @deprecated Use EarningPotentialScore for more meaningful ranking based on estimated earnings.
  */
 export interface MarketAttractivenessScore {
   /** Overall attractiveness score (higher = better) */
@@ -182,9 +183,34 @@ export interface MarketAttractivenessScore {
 }
 
 /**
+ * Score breakdown for market earning potential.
+ * Based on actual reward mechanics and estimated daily earnings.
+ */
+export interface EarningPotentialScore {
+  /** Estimated daily earnings in USD for a fixed liquidity amount */
+  estimatedDailyEarnings: number;
+  /** Earning efficiency ($/day per unit liquidity) - primary ranking metric */
+  earningEfficiency: number;
+  /** Ease of participation score (0-100) based on spread tolerance and min size */
+  easeOfParticipation: number;
+  /** Total score for ranking (earnings-weighted) */
+  totalScore: number;
+}
+
+/**
  * Market with calculated attractiveness score.
+ * @deprecated Use RankedMarketByEarnings for more meaningful ranking.
  */
 export interface RankedMarket extends MarketWithRewards {
   /** Calculated attractiveness score breakdown */
   attractiveness: MarketAttractivenessScore;
+}
+
+/**
+ * Market with calculated earning potential score.
+ * Used for ranking markets by expected daily earnings.
+ */
+export interface RankedMarketByEarnings extends MarketWithRewards {
+  /** Calculated earning potential breakdown */
+  earningPotential: EarningPotentialScore;
 }

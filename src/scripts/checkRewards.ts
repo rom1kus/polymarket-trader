@@ -85,36 +85,66 @@ async function main() {
 
   for (const result of results) {
     const conditionId = result.market.conditionId;
-    const primaryTokenId = result.market.tokenId;
+    const tokenIds = result.market.tokenIds;
 
-    // Fetch order book for Q score comparison (using primary tokenId)
-    const orderBook = await client.getOrderBook(primaryTokenId);
+    // Fetch order books for ALL tokens in this market (YES and NO)
+    // Both order books contribute to the total market Q score
+    const orderBooks = await Promise.all(
+      tokenIds.map((tid) => client.getOrderBook(tid))
+    );
 
-    // Get midpoint from our already-fetched params
-    const midpoint = result.market.midpoint;
     const maxSpreadCents = result.market.rewardsMaxSpread;
 
-    // Calculate total Q score from order book (for comparison)
-    const totalQScore = calculateTotalQScore(
-      orderBook.bids,
-      orderBook.asks,
-      midpoint,
-      maxSpreadCents
-    );
+    // Calculate total Q score from BOTH order books
+    // Each token has its own midpoint, bids, and asks
+    let combinedBidScore = 0;
+    let combinedAskScore = 0;
+
+    for (let i = 0; i < tokenIds.length; i++) {
+      const tokenId = tokenIds[i];
+      const orderBook = orderBooks[i];
+      const tokenMidpoint = result.market.midpointByToken.get(tokenId) ?? result.market.midpoint;
+
+      const tokenQScore = calculateTotalQScore(
+        orderBook.bids,
+        orderBook.asks,
+        tokenMidpoint,
+        maxSpreadCents
+      );
+
+      combinedBidScore += tokenQScore.totalBidScore;
+      combinedAskScore += tokenQScore.totalAskScore;
+    }
+
+    // Total Q_min is the minimum of combined bid and ask scores across all tokens
+    const calculatedTotalQMin = Math.min(combinedBidScore, combinedAskScore);
 
     // Get market rewards info
     const rewardsInfo = marketRewardsMap.get(conditionId);
 
-    // Use market_competitiveness from API as the real total Q_min
-    // Note: We multiply by 2 because market_competitiveness represents one side,
-    // but the total market includes both YES and NO tokens
-    const apiTotalQMin = (rewardsInfo?.marketCompetitiveness ?? 0) * 2;
-
-    // Calculate our earning percentage using adjusted total
-    const ourEarningPct =
-      apiTotalQMin > 0
-        ? calculateEarningPercentage(result.effectiveScore, apiTotalQMin)
+    // market_competitiveness from API is the sum of other makers' Q_min scores
+    // Note: This value is calculated server-side using time-weighted sampling
+    // and may not match our instantaneous order book calculation exactly.
+    const apiMarketCompetitiveness = rewardsInfo?.marketCompetitiveness ?? 0;
+    
+    // Calculate our earning percentage using API's market_competitiveness
+    // Total Q = market_competitiveness (others) + our Q_min
+    const totalQMinFromApi = apiMarketCompetitiveness + result.effectiveScore;
+    const ourEarningPctFromApi =
+      totalQMinFromApi > 0
+        ? calculateEarningPercentage(result.effectiveScore, totalQMinFromApi)
         : 0;
+    
+    // Also calculate using order book for comparison
+    // Note: Order book Q may differ from API due to timing and sampling differences
+    const ourEarningPctFromOrderBook =
+      calculatedTotalQMin > 0
+        ? calculateEarningPercentage(result.effectiveScore, calculatedTotalQMin)
+        : 0;
+
+    // Use API-based calculation as primary (more accurate for actual earnings)
+    const ourEarningPct = ourEarningPctFromApi;
+    const totalQMin = totalQMinFromApi;
 
     // Look up API earning percentage
     const apiEarningPct = apiPercentages[conditionId];
@@ -122,9 +152,9 @@ async function main() {
     resultsWithEarnings.push({
       ...result,
       conditionId,
-      totalQMin: apiTotalQMin,
-      orderBookBidScore: totalQScore.totalBidScore,
-      orderBookAskScore: totalQScore.totalAskScore,
+      totalQMin,
+      orderBookBidScore: combinedBidScore,
+      orderBookAskScore: combinedAskScore,
       ourEarningPct,
       apiEarningPct,
       ratePerDay: rewardsInfo?.ratePerDay,

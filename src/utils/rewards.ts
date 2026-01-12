@@ -219,6 +219,127 @@ export function calculateEarningPercentage(
 }
 
 /**
+ * Estimates daily earnings for a given liquidity amount in a market.
+ *
+ * This uses the Polymarket quadratic reward formula:
+ * - Your Q score = ((maxSpread - spread) / maxSpread)² × size
+ * - Your earning % = yourQScore / totalMarketQScore
+ * - Daily earnings = earningPercent × dailyRewardPool
+ *
+ * For estimation, we assume:
+ * - Orders placed at half the max spread (reasonable competitive position)
+ * - Two-sided liquidity (full score, no penalty)
+ * - Size is the liquidity amount (assuming ~$0.50 per share at midpoint)
+ *
+ * @param rewardsDaily - Total daily reward pool in USD
+ * @param marketCompetitiveness - Market competitiveness from API (represents one side's Q score)
+ * @param liquidityAmount - Amount of liquidity to deploy in USD
+ * @param spreadFromMid - Assumed spread from midpoint in cents (default: half of maxSpread for reasonable estimate)
+ * @param maxSpread - Maximum spread for rewards in cents
+ * @returns Estimated daily earnings in USD
+ *
+ * @example
+ * // Market with $500/day rewards, 200 competition, $100 liquidity at 2.5c spread (half of 5c max)
+ * estimateDailyEarnings(500, 200, 100, 2.5, 5); // Returns ~$1.25
+ */
+export function estimateDailyEarnings(
+  rewardsDaily: number,
+  marketCompetitiveness: number,
+  liquidityAmount: number,
+  spreadFromMid: number,
+  maxSpread: number
+): number {
+  if (rewardsDaily <= 0 || marketCompetitiveness <= 0 || maxSpread <= 0) {
+    return 0;
+  }
+
+  // Calculate the Q score for our liquidity
+  // Assuming ~$0.50 per share at midpoint, so $100 liquidity ≈ 200 shares
+  const sharesPerDollar = 2; // Approximate shares per $1 at midpoint
+  const shares = liquidityAmount * sharesPerDollar;
+  
+  // Q score using quadratic formula: ((v-s)/v)² × size
+  const yourQScore = calculateRewardScore(spreadFromMid, maxSpread, shares);
+
+  // Total market Q score (API returns one side, multiply by 2 for both sides)
+  // Add our Q score to the total since we'd be contributing to it
+  const totalQScore = marketCompetitiveness * 2 + yourQScore;
+
+  // Our earning percentage
+  const earningPct = calculateEarningPercentage(yourQScore, totalQScore);
+
+  // Daily earnings
+  return (earningPct / 100) * rewardsDaily;
+}
+
+/**
+ * Default liquidity amount for earning estimates (in USD).
+ */
+export const DEFAULT_ESTIMATE_LIQUIDITY = 100;
+
+/**
+ * Calculates the earning potential score for market ranking.
+ *
+ * This provides a comprehensive score that combines:
+ * 1. Primary: Estimated daily earnings per $100 liquidity
+ * 2. Secondary: Ease of participation (spread tolerance, min size requirements)
+ *
+ * @param rewardsDaily - Total daily reward pool in USD
+ * @param marketCompetitiveness - Market competitiveness from API
+ * @param maxSpread - Maximum spread for rewards in cents
+ * @param minSize - Minimum order size for rewards in shares
+ * @param liquidityAmount - Liquidity amount for estimate (default $100)
+ * @returns Earning potential breakdown
+ */
+export function calculateEarningPotential(
+  rewardsDaily: number,
+  marketCompetitiveness: number,
+  maxSpread: number,
+  minSize: number,
+  liquidityAmount: number = DEFAULT_ESTIMATE_LIQUIDITY
+): {
+  estimatedDailyEarnings: number;
+  earningEfficiency: number;
+  easeOfParticipation: number;
+  totalScore: number;
+} {
+  // Assume orders at half the max spread for a reasonable competitive position
+  const assumedSpread = maxSpread / 2;
+  
+  // Calculate estimated daily earnings
+  const estimatedDailyEarnings = estimateDailyEarnings(
+    rewardsDaily,
+    marketCompetitiveness,
+    liquidityAmount,
+    assumedSpread,
+    maxSpread
+  );
+
+  // Earning efficiency: $/day per $100 liquidity (normalized)
+  // This is the primary ranking metric
+  const earningEfficiency = estimatedDailyEarnings;
+
+  // Ease of participation score (0-100):
+  // - Higher maxSpread = easier to stay in range (0-50 pts)
+  // - Lower minSize = easier to meet minimum (0-50 pts)
+  const spreadEase = Math.min((maxSpread / 10) * 50, 50);
+  const sizeEase = Math.max(50 - (minSize / 100) * 50, 0);
+  const easeOfParticipation = spreadEase + sizeEase;
+
+  // Total score: primarily based on earnings, with small ease bonus
+  // Earnings are typically 0-10 $/day, ease is 0-100
+  // We weight earnings heavily (10x) so a $1 difference >> ease score
+  const totalScore = earningEfficiency * 10 + easeOfParticipation * 0.01;
+
+  return {
+    estimatedDailyEarnings,
+    earningEfficiency,
+    easeOfParticipation,
+    totalScore,
+  };
+}
+
+/**
  * Fetches reward parameters for a market including current midpoint for all tokens.
  *
  * Combines Gamma API reward params with CLOB midpoint data for each token.

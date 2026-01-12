@@ -460,35 +460,37 @@ export function formatRewardResultsWithEarnings(
     lines.push(`  Your Q_min:           ${result.effectiveScore.toFixed(2)}`);
 
     lines.push("");
-    lines.push(`  Order Book BID Score: ${result.orderBookBidScore.toFixed(2)}`);
-    lines.push(`  Order Book ASK Score: ${result.orderBookAskScore.toFixed(2)}`);
-    lines.push(`  Total Q_min:          ${result.totalQMin.toFixed(2)}`);
+    lines.push(`  Order Book Bid Q:     ${result.orderBookBidScore.toFixed(2)}`);
+    lines.push(`  Order Book Ask Q:     ${result.orderBookAskScore.toFixed(2)}`);
+    lines.push(`  Market Competitiveness (API): ${result.totalQMin.toFixed(2)}`);
 
     lines.push("\n  EARNING PERCENTAGE:");
     lines.push("  " + "-".repeat(66));
-    lines.push(`  Our Calculation:  ${result.ourEarningPct.toFixed(4)}%`);
-
+    
     if (result.apiEarningPct !== undefined) {
-      lines.push(`  API Response:     ${result.apiEarningPct.toFixed(4)}%`);
-
-      const diff = result.ourEarningPct - result.apiEarningPct;
-      const diffAbs = Math.abs(diff);
-      const match = diffAbs < 0.01 ? "MATCH" : diffAbs < 0.1 ? "~CLOSE" : "DIFF";
-      const diffSign = diff >= 0 ? "+" : "";
-      lines.push(`  Difference:       ${diffSign}${diff.toFixed(4)}% (${match})`);
+      lines.push(`  API Earning %:        ${result.apiEarningPct.toFixed(2)}% (official)`);
+      lines.push(`  Instant Estimate:     ${result.ourEarningPct.toFixed(2)}% (from order book)`);
+      
+      if (Math.abs(result.ourEarningPct - result.apiEarningPct) > 10) {
+        lines.push("");
+        lines.push("  Note: Large difference due to API's time-weighted sampling.");
+      }
     } else {
-      lines.push(`  API Response:     (not available)`);
+      lines.push(`  Instant Estimate:     ${result.ourEarningPct.toFixed(2)}%`);
+      lines.push(`  API Earning %:        (not available yet)`);
     }
 
     // Overall status
     lines.push("");
     if (result.eligible) {
+      // Use API earning percentage for the estimate if available (more accurate)
+      const earningPct = result.apiEarningPct ?? result.ourEarningPct;
       let dailyEst = "";
       if (result.ratePerDay !== undefined && result.ratePerDay > 0) {
-        const dailyEarning = (result.ourEarningPct / 100) * result.ratePerDay;
+        const dailyEarning = (earningPct / 100) * result.ratePerDay;
         dailyEst = ` (~$${dailyEarning.toFixed(2)}/day from $${result.ratePerDay}/day pool)`;
       }
-      lines.push(`  >>> ELIGIBLE: Earning ${result.ourEarningPct.toFixed(2)}%${dailyEst}`);
+      lines.push(`  >>> ELIGIBLE: Earning ${earningPct.toFixed(2)}%${dailyEst}`);
     } else {
       lines.push(`  >>> ${result.summary}`);
     }

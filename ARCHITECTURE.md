@@ -115,8 +115,10 @@ Types for reward eligibility checking and market ranking:
 - `RewardCheckResult` - Complete reward check result for a market
 - `RewardCheckResultWithEarnings` - Result with earning % comparison to API
 - `MarketWithRewards` - Market with reward parameters for ranking
-- `MarketAttractivenessScore` - Score breakdown for market attractiveness
-- `RankedMarket` - Market with calculated attractiveness score
+- `MarketAttractivenessScore` - Score breakdown for market attractiveness (deprecated)
+- `EarningPotentialScore` - Score breakdown based on estimated daily earnings
+- `RankedMarket` - Market with calculated attractiveness score (deprecated)
+- `RankedMarketByEarnings` - Market with calculated earning potential score
 
 #### `src/types/strategy.ts`
 Shared types for trading strategies:
@@ -291,6 +293,8 @@ Reward calculation and eligibility checking:
 - `calculateEffectiveScore(buyScore, sellScore, midpoint)` - Calculates effective score
 - `calculateTotalQScore(bids, asks, midpoint, maxSpread)` - Calculates total Q_min from order book
 - `calculateEarningPercentage(yourQMin, totalQMin)` - Calculates earning percentage
+- `estimateDailyEarnings(rewardsDaily, competition, liquidity, spread, maxSpread)` - Estimates daily earnings for a given liquidity
+- `calculateEarningPotential(rewardsDaily, competition, maxSpread, minSize, liquidity)` - Calculates earning potential score for ranking
 - `getMarketRewardParamsWithMidpoint(client, tokenId)` - Fetches params with midpoint
 - `evaluateOrderReward(order, params)` - Evaluates single order reward status
 - `checkOrdersRewardEligibility(orders, params)` - Checks orders for a token
@@ -422,16 +426,16 @@ Generates market maker configuration from an event slug:
 - Usage: `npm run selectMarket -- <event-slug> [market-index]`
 
 #### `src/scripts/findBestMarkets.ts`
-Finds the highest-paying markets for liquidity rewards:
-- Fetches active markets with reward programs from Gamma API
-- Calculates attractiveness score based on:
-  - `rewardsMaxSpread` - Higher = more forgiving spread requirements
-  - `rewardsMinSize` - Lower = easier to participate
-  - `liquidityNum` - Higher = more stable market
-  - `competitive` - Lower = less competition
-- Ranks and displays top markets in a table
-- Supports `--json`, `--details`, `--limit`, `--min-liquidity` options
-- Usage: `npm run findBestMarkets` or `npm run findBestMarkets -- --details 1`
+Finds the highest-earning markets for liquidity rewards:
+- Fetches active markets with reward programs from Polymarket rewards API
+- Calculates estimated daily earnings based on:
+  - `rewardsDaily` - Total daily reward pool for the market
+  - `competitive` - Market competitiveness (total Q score from other makers)
+  - Polymarket's quadratic reward formula: `Q = ((maxSpread - spread) / maxSpread)² × size`
+- Ranks markets by earning potential per $100 liquidity (configurable)
+- Shows APY equivalent and ease of participation metrics
+- Supports `--json`, `--details`, `--limit`, `--max-size`, `--liquidity` options
+- Usage: `npm run findBestMarkets` or `npm run findBestMarkets -- --liquidity 500`
 
 ### `src/strategies/`
 Directory for automated trading strategies. Each strategy should:
