@@ -8,6 +8,9 @@
  * 4. Calculates earning percentage using market_competitiveness from API
  * 5. Compares calculated percentage to API-reported percentage
  *
+ * Orders on both YES and NO tokens of the same market are combined into
+ * a single result per conditionId, matching how Polymarket reports earnings.
+ *
  * Usage: npm run checkRewards
  */
 
@@ -40,7 +43,7 @@ async function main() {
 
   console.log(`Found ${orders.length} open orders. Checking eligibility...`);
 
-  // Check reward eligibility (includes fetching reward params)
+  // Check reward eligibility (groups orders by conditionId)
   const results = await checkAllOrdersRewardEligibility(client, orders);
 
   if (results.length === 0) {
@@ -48,18 +51,10 @@ async function main() {
     return;
   }
 
-  console.log("Fetching order books and market data...\n");
+  console.log(`Found ${results.length} market(s). Fetching order books and market data...\n`);
 
-  // First pass: get condition IDs from order books
-  const conditionIds: string[] = [];
-  const orderBooks = new Map<string, Awaited<ReturnType<typeof client.getOrderBook>>>();
-
-  for (const result of results) {
-    const tokenId = result.market.tokenId;
-    const orderBook = await client.getOrderBook(tokenId);
-    orderBooks.set(tokenId, orderBook);
-    conditionIds.push(orderBook.market);
-  }
+  // Collect conditionIds from results (now available in market params)
+  const conditionIds = results.map((r) => r.market.conditionId);
 
   // Fetch API earning percentages using built-in CLOB client method
   let apiPercentages: Record<string, number> = {};
@@ -73,7 +68,10 @@ async function main() {
   }
 
   // Fetch market rewards info (competitiveness + rate_per_day) from rewards API
-  let marketRewardsMap = new Map<string, { marketCompetitiveness: number; ratePerDay: number }>();
+  let marketRewardsMap = new Map<
+    string,
+    { marketCompetitiveness: number; ratePerDay: number }
+  >();
   try {
     marketRewardsMap = await fetchMarketRewardsInfo(conditionIds);
   } catch (error) {
@@ -86,8 +84,11 @@ async function main() {
   const resultsWithEarnings: RewardCheckResultWithEarnings[] = [];
 
   for (const result of results) {
-    const tokenId = result.market.tokenId;
-    const orderBook = orderBooks.get(tokenId)!;
+    const conditionId = result.market.conditionId;
+    const primaryTokenId = result.market.tokenId;
+
+    // Fetch order book for Q score comparison (using primary tokenId)
+    const orderBook = await client.getOrderBook(primaryTokenId);
 
     // Get midpoint from our already-fetched params
     const midpoint = result.market.midpoint;
@@ -101,9 +102,6 @@ async function main() {
       maxSpreadCents
     );
 
-    // Get condition ID from order book response
-    const conditionId = orderBook.market;
-
     // Get market rewards info
     const rewardsInfo = marketRewardsMap.get(conditionId);
 
@@ -113,9 +111,10 @@ async function main() {
     const apiTotalQMin = (rewardsInfo?.marketCompetitiveness ?? 0) * 2;
 
     // Calculate our earning percentage using adjusted total
-    const ourEarningPct = apiTotalQMin > 0
-      ? calculateEarningPercentage(result.effectiveScore, apiTotalQMin)
-      : 0;
+    const ourEarningPct =
+      apiTotalQMin > 0
+        ? calculateEarningPercentage(result.effectiveScore, apiTotalQMin)
+        : 0;
 
     // Look up API earning percentage
     const apiEarningPct = apiPercentages[conditionId];

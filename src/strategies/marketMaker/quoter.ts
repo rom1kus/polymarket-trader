@@ -1,8 +1,15 @@
 /**
  * Quote generation logic for market making.
  *
- * Generates bid and ask quotes around the current midpoint to earn liquidity rewards.
+ * Generates BUY orders for both YES and NO tokens to earn liquidity rewards.
  * Uses the reward utilities for score calculations.
+ *
+ * The strategy places:
+ * - BUY YES at (midpoint - offset) - equivalent to a traditional bid
+ * - BUY NO at (1 - (midpoint + offset)) - equivalent to a traditional ask
+ *
+ * This approach is economically equivalent to bid/ask on YES token but
+ * doesn't require holding YES/NO tokens upfront - only USDC.
  */
 
 import type { MarketMakerConfig, Quotes, QuoteLevel } from "./types.js";
@@ -30,18 +37,23 @@ function clampPrice(price: number): number {
 }
 
 /**
- * Generates bid and ask quotes around the midpoint.
+ * Generates YES and NO quotes around the midpoint.
  *
- * The strategy places quotes within the max spread to earn rewards.
- * Quotes closer to the midpoint earn higher rewards (quadratic scoring).
+ * The strategy places BUY orders on both tokens to earn rewards:
+ * - BUY YES at (midpoint - offset) - traditional bid equivalent
+ * - BUY NO at (1 - (midpoint + offset)) - mirrored ask equivalent
  *
- * @param midpoint - Current market midpoint (0-1)
+ * This is economically equivalent to bid/ask on YES token but
+ * doesn't require holding tokens upfront - only USDC.
+ *
+ * @param midpoint - Current market midpoint for YES token (0-1)
  * @param config - Market maker configuration
- * @returns Generated bid and ask quotes
+ * @returns Generated YES and NO quotes
  *
  * @example
  * // Midpoint at 0.50, max spread 3 cents, spread percent 50%
- * // Bid will be at 0.485, Ask at 0.515 (1.5 cents from midpoint)
+ * // YES quote: BUY @ 0.485 (1.5c below midpoint)
+ * // NO quote: BUY @ 0.485 (= 1 - 0.515, mirrored ask)
  * const quotes = generateQuotes(0.50, config);
  */
 export function generateQuotes(
@@ -58,27 +70,31 @@ export function generateQuotes(
   // Parse tick size for rounding
   const tickSize = parseFloat(market.tickSize);
 
-  // Calculate bid and ask prices
-  const rawBidPrice = midpoint - offset;
-  const rawAskPrice = midpoint + offset;
+  // YES quote: BUY at (midpoint - offset)
+  // This is the traditional "bid" - buying YES tokens below midpoint
+  const rawYesPrice = midpoint - offset;
+  const yesPrice = clampPrice(roundToTick(rawYesPrice, tickSize));
+  // Ensure YES price is below midpoint
+  const finalYesPrice = Math.min(yesPrice, clampPrice(roundToTick(midpoint - tickSize, tickSize)));
 
-  // Round to tick size and clamp to valid range
-  const bidPrice = clampPrice(roundToTick(rawBidPrice, tickSize));
-  const askPrice = clampPrice(roundToTick(rawAskPrice, tickSize));
-
-  // Ensure bid < ask (can happen at extreme prices)
-  const finalBidPrice = Math.min(bidPrice, midpoint - tickSize);
-  const finalAskPrice = Math.max(askPrice, midpoint + tickSize);
+  // NO quote: BUY at (1 - (midpoint + offset))
+  // This is equivalent to SELL YES at (midpoint + offset)
+  // Since YES + NO = 1, if we want to "sell YES at 0.55", we "buy NO at 0.45"
+  const rawNoPrice = 1 - (midpoint + offset);
+  const noPrice = clampPrice(roundToTick(rawNoPrice, tickSize));
+  // Ensure NO price is below NO midpoint (which is 1 - midpoint)
+  const noMidpoint = 1 - midpoint;
+  const finalNoPrice = Math.min(noPrice, clampPrice(roundToTick(noMidpoint - tickSize, tickSize)));
 
   return {
-    bid: {
+    yesQuote: {
       side: "BUY",
-      price: clampPrice(roundToTick(finalBidPrice, tickSize)),
+      price: finalYesPrice,
       size: orderSize,
     },
-    ask: {
-      side: "SELL",
-      price: clampPrice(roundToTick(finalAskPrice, tickSize)),
+    noQuote: {
+      side: "BUY",
+      price: finalNoPrice,
       size: orderSize,
     },
     midpoint,
@@ -106,16 +122,20 @@ export function shouldRebalance(
  * Uses the shared reward calculation from @/utils/rewards.
  *
  * @param quote - The quote level
- * @param midpoint - Market midpoint
+ * @param tokenType - "YES" or "NO" to indicate which token
+ * @param midpoint - Market midpoint for YES token
  * @param maxSpreadCents - Maximum spread for rewards (in cents)
  * @returns Estimated reward score (higher is better)
  */
 export function estimateRewardScore(
   quote: QuoteLevel,
+  tokenType: "YES" | "NO",
   midpoint: number,
   maxSpreadCents: number
 ): number {
-  const spreadCents = calculateSpreadCents(quote.price, midpoint);
+  // For NO token, the relevant midpoint is (1 - yesMidpoint)
+  const relevantMidpoint = tokenType === "YES" ? midpoint : 1 - midpoint;
+  const spreadCents = calculateSpreadCents(quote.price, relevantMidpoint);
   return calculateRewardScore(spreadCents, maxSpreadCents, quote.size);
 }
 
@@ -123,10 +143,17 @@ export function estimateRewardScore(
  * Formats a quote for display.
  *
  * @param quote - Quote to format
- * @param midpoint - Market midpoint
+ * @param tokenType - "YES" or "NO" to indicate which token
+ * @param midpoint - Market midpoint for YES token (used to calculate spread)
  * @returns Formatted string
  */
-export function formatQuote(quote: QuoteLevel, midpoint: number): string {
-  const spreadCents = calculateSpreadCents(quote.price, midpoint);
-  return `${quote.side} ${quote.size} @ $${quote.price.toFixed(4)} (${spreadCents.toFixed(1)}c from mid)`;
+export function formatQuote(
+  quote: QuoteLevel,
+  tokenType: "YES" | "NO",
+  midpoint: number
+): string {
+  // For NO token, the relevant midpoint is (1 - yesMidpoint)
+  const relevantMidpoint = tokenType === "YES" ? midpoint : 1 - midpoint;
+  const spreadCents = calculateSpreadCents(quote.price, relevantMidpoint);
+  return `BUY ${tokenType} ${quote.size} @ $${quote.price.toFixed(4)} (${spreadCents.toFixed(1)}c from mid)`;
 }

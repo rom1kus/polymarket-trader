@@ -7,23 +7,8 @@
  *   npm run selectMarket -- <event-slug-or-url>
  */
 
-import type { MarketMakerConfig, InventoryConfig, WebSocketConfig, PositionLimitsConfig } from "./types.js";
+import type { MarketMakerConfig, WebSocketConfig, PositionLimitsConfig } from "./types.js";
 import type { MarketParams } from "@/types/strategy.js";
-
-/**
- * Default inventory management parameters.
- */
-export const DEFAULT_INVENTORY_PARAMS: InventoryConfig = {
-  /**
-   * Minimum tokens per side before warning/auto-split.
-   * The effective minimum will be max(this, market.minOrderSize).
-   */
-  minTokenBalance: 25,
-  /** Auto-split USDC when token balance falls below minimum */
-  autoSplitEnabled: true,
-  /** Keep 20% extra USDC as buffer for buy orders */
-  usdcReserveMultiplier: 1.2,
-};
 
 /**
  * Default position limits for risk management.
@@ -32,7 +17,7 @@ export const DEFAULT_POSITION_LIMITS: PositionLimitsConfig = {
   /**
    * Maximum net exposure (|yesTokens - noTokens|) before blocking one side.
    * E.g., 100 means stop buying YES when netExposure > 100,
-   * and stop selling YES when netExposure < -100.
+   * and stop buying NO when netExposure < -100.
    */
   maxNetExposure: 10,
   /**
@@ -73,8 +58,6 @@ export const DEFAULT_STRATEGY_PARAMS = {
   refreshIntervalMs: 30_000,
   /** Rebalance if midpoint moves by 0.5 cents */
   rebalanceThreshold: 0.005,
-  /** Inventory management settings */
-  inventory: DEFAULT_INVENTORY_PARAMS,
   /** Position limits for risk management */
   positionLimits: DEFAULT_POSITION_LIMITS,
   /** WebSocket configuration */
@@ -111,7 +94,6 @@ export function createMarketMakerConfig(
     spreadPercent: overrides?.spreadPercent ?? DEFAULT_STRATEGY_PARAMS.spreadPercent,
     refreshIntervalMs: overrides?.refreshIntervalMs ?? DEFAULT_STRATEGY_PARAMS.refreshIntervalMs,
     rebalanceThreshold: overrides?.rebalanceThreshold ?? DEFAULT_STRATEGY_PARAMS.rebalanceThreshold,
-    inventory: overrides?.inventory ?? DEFAULT_STRATEGY_PARAMS.inventory,
     positionLimits: overrides?.positionLimits ?? DEFAULT_STRATEGY_PARAMS.positionLimits,
     webSocket: {
       ...DEFAULT_WEBSOCKET_PARAMS,
@@ -177,16 +159,9 @@ export const STRATEGY_OVERRIDES: Partial<Omit<MarketMakerConfig, "market">> = {
   // Refresh every 30 seconds (fallback when WebSocket is disabled)
   refreshIntervalMs: 30_000,
 
-  // Inventory management
-  inventory: {
-    minTokenBalance: 20,
-    autoSplitEnabled: true,
-    usdcReserveMultiplier: 1.2,
-  },
-
   // Position limits for risk management
   positionLimits: {
-    maxNetExposure: 10,  // Stop quoting one side at ±100 token exposure
+    maxNetExposure: 10,  // Stop quoting one side at ±10 token exposure
     warnThreshold: 0.8,   // Warn at 80% of limit
   },
 
@@ -203,8 +178,8 @@ export const STRATEGY_OVERRIDES: Partial<Omit<MarketMakerConfig, "market">> = {
   // =========================================================================
   // DRY RUN MODE - Set to false for LIVE trading
   // =========================================================================
-  // When true: Orders are simulated, splits are logged but not executed
-  // When false: Real orders placed, real USDC split into tokens
+  // When true: Orders are simulated, not placed
+  // When false: Real orders placed
   dryRun: true,
 };
 

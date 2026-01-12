@@ -1,14 +1,17 @@
 /**
  * Market Maker Strategy - Main Entry Point
  *
- * A market maker bot that places two-sided limit orders around the
- * current midpoint to earn Polymarket liquidity rewards.
+ * A market maker bot that places BUY orders on both YES and NO tokens
+ * around the current midpoint to earn Polymarket liquidity rewards.
+ *
+ * The strategy is USDC-only - it doesn't require holding YES/NO tokens upfront.
+ * Instead of BUY YES + SELL YES, it places BUY YES + BUY NO orders which is
+ * economically equivalent but more capital efficient.
  *
  * Features:
  * - **WebSocket real-time updates** - Reacts to price changes in ~50ms
- * - Pre-flight checks (balance validation, MATIC for gas)
- * - Auto-split USDC into YES+NO tokens for two-sided liquidity
- * - All CTF operations executed through Safe (Gnosis Safe) account
+ * - **USDC-only operation** - No token splitting required
+ * - Position tracking with configurable limits
  * - Dry run mode for safe testing
  * - Fallback to REST polling when WebSocket disconnects
  *
@@ -20,14 +23,10 @@
  *   5. Press Ctrl+C to stop (will cancel all orders before exiting)
  */
 
-import { Wallet } from "@ethersproject/wallet";
 import { createAuthenticatedClobClient } from "@/utils/authClient.js";
 import { log } from "@/utils/helpers.js";
-import { env } from "@/utils/env.js";
-import { getPolygonProvider, createSafeForCtf } from "@/utils/ctf.js";
-import { runPreFlightChecks, formatInventoryStatus } from "@/utils/inventory.js";
+import { getUsdcBalance } from "@/utils/balance.js";
 import { validateConfig, printBanner } from "./lifecycle.js";
-import { executeSplitIfNeeded } from "./executor.js";
 import { runWithWebSocket, runWithPolling } from "./modes/index.js";
 import { CONFIG } from "./config.js";
 import type { MarketMakerConfig } from "./types.js";
@@ -42,64 +41,38 @@ async function runMarketMaker(config: MarketMakerConfig): Promise<void> {
   // Print startup banner
   printBanner(config);
 
-  // Initialize client and Safe wallet
+  // Initialize client
   log("Initializing authenticated client...");
   const client = await createAuthenticatedClobClient();
   log("Client initialized successfully");
 
-  // Initialize Safe for CTF operations
-  log("Initializing Safe wallet for CTF operations...");
-  const safeAddress = env.POLYMARKET_PROXY_ADDRESS;
-  const signerAddress = new Wallet(env.FUNDER_PRIVATE_KEY).address;
-  const safe = await createSafeForCtf({
-    signerPrivateKey: env.FUNDER_PRIVATE_KEY,
-    safeAddress,
-  });
-  const provider = getPolygonProvider();
-  log(`Safe initialized: ${safeAddress}`);
-  log(`Signer (gas payer): ${signerAddress}`);
-
   // =========================================================================
-  // PRE-FLIGHT CHECKS
+  // PRE-FLIGHT CHECKS - USDC balance check
   // =========================================================================
   log("\nRunning pre-flight checks...");
 
-  const preflight = await runPreFlightChecks(
-    client,
-    config.market,
-    config.orderSize,
-    config.inventory,
-    signerAddress, // Use signer address for MATIC gas balance check
-    provider
-  );
+  // Check USDC balance is sufficient for order sizes
+  const usdcBalance = await getUsdcBalance(client);
+  log(`  USDC Balance: $${usdcBalance.balanceNumber.toFixed(2)}`);
 
-  // Show current inventory
-  log("\nCurrent inventory:");
-  console.log(formatInventoryStatus(preflight.status));
-
-  // Show warnings
-  for (const warning of preflight.warnings) {
-    log(`  WARNING: ${warning}`);
-  }
-
-  // Fail on errors
-  if (!preflight.ready) {
-    log("\nPre-flight checks FAILED:");
-    for (const error of preflight.errors) {
-      log(`  ERROR: ${error}`);
-    }
-    throw new Error("Pre-flight checks failed. Cannot start market maker.");
-  }
-
-  // Execute split if needed
-  if (preflight.deficit && preflight.deficit.splitAmount > 0) {
-    await executeSplitIfNeeded(
-      safe,
-      safeAddress,
-      provider,
-      config,
-      preflight.deficit.splitAmount
+  // Calculate minimum USDC needed:
+  // - BUY YES @ ~(midpoint - offset) costs orderSize * price
+  // - BUY NO @ ~(1 - midpoint - offset) costs orderSize * price
+  // - Total ≈ orderSize * 1 = orderSize USDC per cycle
+  // - Add buffer for multiple cycles before fills get sold
+  // - Use 2x orderSize as minimum to allow for price movements
+  const minUsdc = config.orderSize * 2;
+  
+  if (usdcBalance.balanceNumber < minUsdc) {
+    throw new Error(
+      `Insufficient USDC: have $${usdcBalance.balanceNumber.toFixed(2)}, need at least $${minUsdc.toFixed(2)} for order sizes (2x buffer)`
     );
+  }
+
+  // Warn if balance is low (less than 5x order size)
+  const warningThreshold = config.orderSize * 5;
+  if (usdcBalance.balanceNumber < warningThreshold) {
+    log(`  WARNING: USDC balance is low. Consider adding more for sustained trading.`);
   }
 
   log("\nPre-flight checks PASSED\n");
@@ -108,7 +81,7 @@ async function runMarketMaker(config: MarketMakerConfig): Promise<void> {
   // MAIN LOOP - WebSocket or Polling
   // =========================================================================
 
-  const runnerContext = { config, client, safe, safeAddress, signerAddress, provider };
+  const runnerContext = { config, client };
 
   if (config.webSocket.enabled) {
     await runWithWebSocket(runnerContext);
