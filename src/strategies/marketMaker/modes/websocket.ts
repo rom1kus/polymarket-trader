@@ -42,8 +42,11 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<voi
 
   /**
    * Executes a rebalance cycle.
+   * @param midpoint - Current market midpoint
+   * @param source - Source of the rebalance trigger (for logging)
+   * @param force - Force rebalance even if midpoint hasn't moved (e.g., position limit change)
    */
-  const executeRebalance = async (midpoint: number, source: string): Promise<void> => {
+  const executeRebalance = async (midpoint: number, source: string, force: boolean = false): Promise<void> => {
     // Prevent concurrent rebalances
     if (isRebalancing) {
       return;
@@ -57,11 +60,12 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<voi
       // Check if we need to rebalance
       const hasQuotes = state.activeQuotes.yesQuote !== null || state.activeQuotes.noQuote !== null;
       const needsRebalance =
+        force ||
         !hasQuotes ||
         shouldRebalance(midpoint, state.activeQuotes.lastMidpoint, config.rebalanceThreshold);
 
       if (needsRebalance) {
-        const reason = !hasQuotes ? "No active quotes" : "Midpoint moved";
+        const reason = force ? "Position limit changed" : (!hasQuotes ? "No active quotes" : "Midpoint moved");
         log(`  ${reason}, rebalancing...`);
 
         // Cancel existing orders
@@ -214,13 +218,14 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<voi
                 const currentMidpoint = debounce.getLatestValue();
                 if (currentMidpoint !== null) {
                   // Don't await - let it run async to not block WebSocket processing
-                  executeRebalance(currentMidpoint, "fill").catch((err) => {
+                  // Force rebalance since position limits changed (not just midpoint)
+                  executeRebalance(currentMidpoint, "fill", true).catch((err) => {
                     log(`  Fill-triggered rebalance error: ${err}`);
                   });
                 } else {
                   // Fetch midpoint and rebalance
                   getMidpoint(client, config.market.yesTokenId)
-                    .then((midpoint) => executeRebalance(midpoint, "fill"))
+                    .then((midpoint) => executeRebalance(midpoint, "fill", true))
                     .catch((err) => {
                       log(`  Fill-triggered rebalance error: ${err}`);
                     });
@@ -245,6 +250,10 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<voi
 
       try {
         await userWs.connect();
+        // Small delay to ensure auth is processed before placing orders
+        // This prevents a race condition where fills could be missed
+        await new Promise(resolve => setTimeout(resolve, 500));
+        log("User WebSocket ready for fill tracking");
       } catch (error) {
         log(`User WebSocket connection failed: ${error}`);
         // Continue without user WebSocket - position tracking will be stale

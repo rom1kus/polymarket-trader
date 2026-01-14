@@ -45,7 +45,6 @@ import type {
 import {
   loadMarketState,
   saveMarketState,
-  createEmptyState,
   appendFill,
   setInitialPosition,
 } from "@/utils/storage.js";
@@ -178,28 +177,28 @@ export class PositionTracker {
         `[PositionTracker] Position discrepancy detected:\n` +
         `  Expected: YES=${expectedYes.toFixed(2)}, NO=${expectedNo.toFixed(2)}\n` +
         `  Actual:   YES=${yesBalance.toFixed(2)}, NO=${noBalance.toFixed(2)}\n` +
-        `  Using actual balance as truth.`
+        `  Adjusting baseline to match actual (preserving fill history).`
       );
 
-      // Update initial position to account for discrepancy
-      // This effectively "resets" the baseline to current state
-      setInitialPosition(
-        this.conditionId,
-        this.yesTokenId,
-        this.noTokenId,
-        yesBalance,
-        noBalance
-      );
+      // Adjust the initial position to account for discrepancy
+      // This preserves fill history while making the math work out
+      // New initial = actual - sum(fills) = actual - (expected - old_initial)
+      //             = actual - expected + old_initial
+      const adjustedInitialYes = (persisted.initialPosition?.yesTokens ?? 0) + yesDiscrepancy;
+      const adjustedInitialNo = (persisted.initialPosition?.noTokens ?? 0) + noDiscrepancy;
 
-      // Clear fills since we're resetting
-      const newState = createEmptyState(this.conditionId, this.yesTokenId, this.noTokenId);
-      newState.initialPosition = {
-        yesTokens: yesBalance,
-        noTokens: noBalance,
+      // Update the initial position in persisted state (keeps fills intact)
+      persisted.initialPosition = {
+        yesTokens: adjustedInitialYes,
+        noTokens: adjustedInitialNo,
         timestamp: Date.now(),
       };
-      saveMarketState(newState);
-      this.processedFillIds.clear();
+      saveMarketState(persisted);
+
+      log(
+        `[PositionTracker] Adjusted baseline: YES=${adjustedInitialYes.toFixed(2)}, NO=${adjustedInitialNo.toFixed(2)}\n` +
+        `  Preserved ${persisted.fills.length} fills in history.`
+      );
     } else {
       log(
         `[PositionTracker] Loaded ${persisted.fills.length} fills - ` +

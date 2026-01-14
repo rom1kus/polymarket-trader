@@ -256,65 +256,114 @@ export interface UserRewardData {
  * Options for fetching markets with rewards.
  */
 export interface FetchMarketsWithRewardsOptions {
-  /** Maximum number of markets to fetch (default: 100) */
+  /** Maximum number of markets to fetch. Use Infinity to fetch all (default: Infinity) */
   limit?: number;
   /** Maximum rewardsMinSize - filter markets by min shares required for rewards */
   maxMinSize?: number;
+  /** Liquidity amount for early compatibility filtering (skips markets that can't meet minSize) */
+  liquidityAmount?: number;
+  /** Progress callback - called after each page with (fetched, total, filtered) */
+  onProgress?: (fetched: number, total: number, filtered: number) => void;
 }
 
 /**
  * Fetches markets with active reward programs from Polymarket rewards API.
+ * 
+ * Supports pagination to fetch all markets (API returns max 100 per request).
+ * Applies early filtering during fetch to reduce memory usage.
  *
  * @param options - Filtering options
  * @param fetcher - Optional fetch function for testing
  * @returns Array of markets with reward info
  *
  * @example
- * const markets = await fetchMarketsWithRewards({ limit: 50 });
- * console.log(`Found ${markets.length} markets with rewards`);
+ * // Fetch all markets with progress
+ * const markets = await fetchMarketsWithRewards({
+ *   liquidityAmount: 100,
+ *   onProgress: (fetched, total, filtered) => {
+ *     console.log(`Fetched ${fetched}/${total}, kept ${filtered}`);
+ *   }
+ * });
  */
 export async function fetchMarketsWithRewards(
   options: FetchMarketsWithRewardsOptions = {},
   fetcher: typeof fetch = fetch
 ): Promise<MarketWithRewards[]> {
   const {
-    limit = 100,
+    limit = Infinity,
     maxMinSize,
+    liquidityAmount,
+    onProgress,
   } = options;
 
-  // Use the Polymarket rewards API which returns only markets with active rewards
-  const url = `https://polymarket.com/api/rewards/markets?limit=${limit}`;
-  const response = await fetcher(url);
+  const PAGE_SIZE = 100; // API returns 100 per request
+  const markets: MarketWithRewards[] = [];
+  let nextCursor: string | null = null;
+  let totalCount = 0;
+  let fetchedCount = 0;
 
-  if (!response.ok) {
-    throw new Error(
-      `Failed to fetch rewards markets: ${response.status} ${response.statusText}`
-    );
-  }
+  while (true) {
+    // Fetch a page using cursor-based pagination
+    const url = nextCursor
+      ? `https://polymarket.com/api/rewards/markets?nextCursor=${nextCursor}`
+      : `https://polymarket.com/api/rewards/markets`;
+    const response = await fetcher(url);
 
-  const responseData = (await response.json()) as {
-    data: RewardsMarketResponse[];
-    total_count: number;
-  };
-  const rawMarkets = responseData.data;
+    if (!response.ok) {
+      throw new Error(
+        `Failed to fetch rewards markets: ${response.status} ${response.statusText}`
+      );
+    }
 
-  // Filter and transform markets
-  const markets: MarketWithRewards[] = rawMarkets
-    .filter((m) => {
-      // Apply max min size filter (for reward eligibility)
-      if (maxMinSize !== undefined && m.rewards_min_size > maxMinSize) return false;
-      // Only include markets with active reward config
-      if (!m.rewards_max_spread || m.rewards_max_spread <= 0) return false;
-      return true;
-    })
-    .map((m) => {
+    const responseData = (await response.json()) as {
+      data: RewardsMarketResponse[];
+      total_count: number;
+      next_cursor: string | null;
+      count: number;
+    };
+
+    totalCount = responseData.total_count;
+    const rawMarkets = responseData.data ?? [];
+    fetchedCount += responseData.count ?? 0;
+
+    // Process and filter this page
+    for (const m of rawMarkets) {
+      // Early filter: skip markets without active reward config
+      if (!m.rewards_max_spread || m.rewards_max_spread <= 0) continue;
+
+      // Early filter: skip markets exceeding max min size
+      if (maxMinSize !== undefined && m.rewards_min_size > maxMinSize) continue;
+
+      // Get YES token price for share calculations
+      const midpoint = m.tokens && m.tokens.length >= 1 ? m.tokens[0].price : undefined;
+
+      // Early filter: skip markets where liquidity can't meet minSize
+      if (liquidityAmount !== undefined && midpoint !== undefined && m.rewards_min_size > 0) {
+        const twoSidedRequired = midpoint < 0.1 || midpoint > 0.9;
+        
+        if (twoSidedRequired) {
+          // Both sides need to meet minSize
+          const halfLiq = liquidityAmount / 2;
+          const yesShares = halfLiq / midpoint;
+          const noShares = halfLiq / (1 - midpoint);
+          if (yesShares < m.rewards_min_size || noShares < m.rewards_min_size) continue;
+        } else {
+          // Single-sided: check if we can meet minSize on the cheaper side
+          const shares = liquidityAmount / midpoint;
+          if (shares < m.rewards_min_size) continue;
+        }
+      }
+
       // Calculate daily rewards from rewards_config
       const rewardsDaily = m.rewards_config?.reduce(
         (sum, rc) => sum + (rc.rate_per_day || 0),
         0
       ) ?? 0;
 
-      return {
+      // Skip markets with no reward pool
+      if (rewardsDaily <= 0) continue;
+
+      markets.push({
         id: String(m.market_id),
         question: m.question,
         conditionId: m.condition_id,
@@ -335,8 +384,28 @@ export async function fetchMarketsWithRewards(
         spread: m.spread,
         competitive: m.market_competitiveness,
         rewardsDaily,
-      };
-    });
+        midpoint,
+      });
+
+      // Check if we've reached the limit
+      if (markets.length >= limit) {
+        break;
+      }
+    }
+
+    // Report progress
+    if (onProgress) {
+      onProgress(Math.min(fetchedCount, totalCount), totalCount, markets.length);
+    }
+
+    // Get next cursor for pagination
+    nextCursor = responseData.next_cursor;
+
+    // Check if we've fetched all pages or reached limit
+    if (!nextCursor || fetchedCount >= totalCount || markets.length >= limit) {
+      break;
+    }
+  }
 
   return markets;
 }
@@ -417,11 +486,30 @@ export interface MarketRewardsInfo {
 }
 
 /**
+ * Response from CLOB rewards endpoint for a single market.
+ */
+interface ClobRewardsMarketResponse {
+  condition_id: string;
+  question: string;
+  market_slug: string;
+  tokens: Array<{ token_id: string; outcome: string; price: number }>;
+  rewards_config: Array<{
+    asset_address: string;
+    start_date: string;
+    end_date: string;
+    rate_per_day: number;
+    total_rewards: number;
+  }>;
+  rewards_max_spread: number;
+  rewards_min_size: number;
+  market_competitiveness: number;
+}
+
+/**
  * Fetches market rewards data for specific condition IDs.
  *
- * Note: The Polymarket rewards API doesn't support filtering by condition ID,
- * so this fetches all markets and filters client-side. This is inefficient
- * but necessary since the API ignores filter params.
+ * Uses the CLOB API endpoint which supports direct lookup by condition ID:
+ * https://clob.polymarket.com/rewards/markets/{conditionId}
  *
  * @param conditionIds - Array of condition IDs to look up
  * @param fetcher - Optional fetch function for testing
@@ -431,38 +519,42 @@ export async function fetchMarketRewardsInfo(
   conditionIds: string[],
   fetcher: typeof fetch = fetch
 ): Promise<Map<string, MarketRewardsInfo>> {
-  // The API returns paginated results, we need to fetch enough to find our markets
-  // For now, fetch up to 500 markets (should cover most cases)
-  const url = `https://polymarket.com/api/rewards/markets?limit=500`;
-  const response = await fetcher(url);
-
-  if (!response.ok) {
-    throw new Error(
-      `Failed to fetch market rewards info: ${response.status} ${response.statusText}`
-    );
-  }
-
-  const responseData = (await response.json()) as {
-    data: RewardsMarketResponse[];
-    total_count: number;
-  };
-
-  const conditionIdSet = new Set(conditionIds);
   const result = new Map<string, MarketRewardsInfo>();
 
-  for (const m of responseData.data) {
-    if (conditionIdSet.has(m.condition_id)) {
-      const ratePerDay = m.rewards_config?.reduce(
-        (sum, rc) => sum + (rc.rate_per_day || 0),
-        0
-      ) ?? 0;
+  // Fetch each market directly from the CLOB rewards endpoint
+  // This endpoint supports direct lookup by condition ID
+  const fetchPromises = conditionIds.map(async (conditionId) => {
+    try {
+      const url = `${config.clobHost}/rewards/markets/${conditionId}`;
+      const response = await fetcher(url);
 
-      result.set(m.condition_id, {
-        marketCompetitiveness: m.market_competitiveness ?? 0,
-        ratePerDay,
-      });
+      if (!response.ok) {
+        // Market may not have rewards enabled
+        return;
+      }
+
+      const responseData = (await response.json()) as {
+        data: ClobRewardsMarketResponse[];
+      };
+
+      if (responseData.data && responseData.data.length > 0) {
+        const m = responseData.data[0];
+        const ratePerDay = m.rewards_config?.reduce(
+          (sum, rc) => sum + (rc.rate_per_day || 0),
+          0
+        ) ?? 0;
+
+        result.set(conditionId, {
+          marketCompetitiveness: m.market_competitiveness ?? 0,
+          ratePerDay,
+        });
+      }
+    } catch {
+      // Silently ignore errors for individual markets
     }
-  }
+  });
+
+  await Promise.all(fetchPromises);
 
   return result;
 }
