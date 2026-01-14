@@ -353,15 +353,32 @@ export class UserWebSocket {
 /**
  * Converts a UserTradeEvent from WebSocket to our Fill type.
  *
+ * IMPORTANT: The WebSocket trade event's `side` field represents the TAKER's side.
+ * When you're the maker (your resting order gets filled), you need to invert the side
+ * to get YOUR perspective on the trade.
+ *
+ * - If trade_owner === owner: You're the taker, use side as-is
+ * - If trade_owner !== owner: You're the maker, invert the side
+ *
  * @param trade - Trade event from WebSocket
  * @returns Fill object for storage/tracking
  */
 export function tradeEventToFill(trade: UserTradeEvent): import("@/types/fills.js").Fill {
+  // Determine if we're the maker or taker
+  // trade_owner is the taker's API key, owner is the event recipient (us)
+  const isMaker = trade.trade_owner !== trade.owner;
+
+  // The side in the event is the TAKER's side
+  // If we're the maker, our side is the opposite
+  const ourSide: "BUY" | "SELL" = isMaker
+    ? (trade.side === "BUY" ? "SELL" : "BUY")
+    : trade.side;
+
   return {
     id: trade.id,
     tokenId: trade.asset_id,
     conditionId: trade.market,
-    side: trade.side,
+    side: ourSide,
     price: parseFloat(trade.price),
     size: parseFloat(trade.size),
     timestamp: parseInt(trade.timestamp, 10) * 1000, // Convert seconds to ms

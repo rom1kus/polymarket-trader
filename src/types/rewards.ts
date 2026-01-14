@@ -2,6 +2,13 @@
  * Types for liquidity reward checking.
  *
  * Used by checkRewards script and reward calculation utilities.
+ *
+ * Terminology (from Polymarket docs):
+ * - Q_one: Sum of scores for orders on the "bid side" (BUY on primary token)
+ * - Q_two: Sum of scores for orders on the "ask side" (SELL on primary token)
+ * - Q_min: Effective score after two-sided requirement consideration
+ *
+ * See src/utils/rewards.ts header for full documentation.
  */
 
 /**
@@ -75,19 +82,29 @@ export interface RewardCheckResult {
   market: MarketRewardParamsWithMidpoint;
   /** Status for each order */
   orders: OrderRewardStatus[];
-  /** Whether two-sided liquidity is required */
+  /** Whether two-sided liquidity is required (midpoint outside [0.10, 0.90]) */
   twoSidedRequired: boolean;
-  /** Whether there are eligible buy orders */
-  hasBuySide: boolean;
-  /** Whether there are eligible sell orders */
-  hasSellSide: boolean;
-  /** Total score from buy orders */
-  totalBuyScore: number;
-  /** Total score from sell orders */
-  totalSellScore: number;
-  /** Effective score after two-sided consideration */
+  /** Whether there are eligible orders contributing to Q_one */
+  hasQOne: boolean;
+  /** Whether there are eligible orders contributing to Q_two */
+  hasQTwo: boolean;
+  /**
+   * Q_one: Total score from orders on the "bid side" of the market.
+   * For primary token: BUY orders. For secondary token: SELL orders.
+   */
+  qOne: number;
+  /**
+   * Q_two: Total score from orders on the "ask side" of the market.
+   * For primary token: SELL orders. For secondary token: BUY orders.
+   */
+  qTwo: number;
+  /**
+   * Q_min: Effective score after two-sided consideration.
+   * - If midpoint in [0.10, 0.90]: max(min(Q_one, Q_two), max(Q_one/c, Q_two/c))
+   * - If midpoint outside range: min(Q_one, Q_two)
+   */
   effectiveScore: number;
-  /** Scaling factor for single-sided penalty */
+  /** Scaling factor for single-sided penalty (c in formula, default 3.0) */
   scalingFactor: number;
   /** Overall eligibility status */
   eligible: boolean;
@@ -97,20 +114,23 @@ export interface RewardCheckResult {
 
 /**
  * Reward check result with earning percentage comparison.
- * Extends RewardCheckResult with order book Q_min and API comparison.
+ * Extends RewardCheckResult with order book Q scores and API comparison.
  */
 export interface RewardCheckResultWithEarnings extends RewardCheckResult {
   /** Condition ID for the market */
   conditionId: string;
-  /** Total Q_min from the order book (min of bid/ask scores) */
+  /**
+   * Total Q_min from the order book (instant snapshot).
+   * Note: This differs from API's time-weighted value.
+   */
   totalQMin: number;
-  /** Total bid score from order book */
-  orderBookBidScore: number;
-  /** Total ask score from order book */
-  orderBookAskScore: number;
-  /** Our calculated earning percentage */
+  /** Q_one from order book (total bid side score) */
+  orderBookQOne: number;
+  /** Q_two from order book (total ask side score) */
+  orderBookQTwo: number;
+  /** Our calculated earning percentage (instant) */
   ourEarningPct: number;
-  /** API-reported earning percentage (undefined if not available) */
+  /** API-reported earning percentage (time-weighted, undefined if not available) */
   apiEarningPct?: number;
   /** Daily reward rate for this market in USD (undefined if not available) */
   ratePerDay?: number;
@@ -161,6 +181,8 @@ export interface MarketWithRewards {
   competitive?: number;
   /** Daily reward amount in USD (if available from API) */
   rewardsDaily?: number;
+  /** Current midpoint price from token prices (0-1) */
+  midpoint?: number;
 }
 
 /**
@@ -195,6 +217,10 @@ export interface EarningPotentialScore {
   easeOfParticipation: number;
   /** Total score for ranking (earnings-weighted) */
   totalScore: number;
+  /** Whether the market is compatible with the given liquidity amount */
+  compatible: boolean;
+  /** Reason for incompatibility (if any) */
+  incompatibleReason?: string;
 }
 
 /**

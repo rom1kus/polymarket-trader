@@ -35,9 +35,31 @@ import {
   DEFAULT_ESTIMATE_LIQUIDITY,
 } from "@/utils/rewards.js";
 import { formatCurrency } from "@/utils/formatters.js";
+import {
+  fetchBatchCompetition,
+  type MarketForCompetition,
+} from "@/utils/orderbook.js";
+
+/**
+ * Extracts the first token ID from a market's clobTokenIds field.
+ */
+function getFirstTokenId(market: MarketWithRewards): string | null {
+  if (!market.clobTokenIds) return null;
+  const trimmed = market.clobTokenIds.trim();
+  if (trimmed.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(trimmed) as string[];
+      return parsed[0] ?? null;
+    } catch {
+      return null;
+    }
+  }
+  return trimmed.split(",")[0] ?? null;
+}
 
 /**
  * Ranks markets by earning potential.
+ * Filters out incompatible markets (where liquidity can't meet minSize requirements).
  */
 function rankMarketsByEarnings(
   markets: MarketWithRewards[],
@@ -51,10 +73,11 @@ function rankMarketsByEarnings(
         market.competitive ?? 0,
         market.rewardsMaxSpread,
         market.rewardsMinSize,
-        liquidityAmount
+        liquidityAmount,
+        market.midpoint ?? 0.5 // Use actual midpoint if available
       ),
     }))
-    .filter((m) => m.earningPotential.estimatedDailyEarnings > 0)
+    .filter((m) => m.earningPotential.compatible && m.earningPotential.estimatedDailyEarnings > 0)
     .sort(
       (a, b) =>
         b.earningPotential.estimatedDailyEarnings -
@@ -70,8 +93,8 @@ function formatMarketRow(
   rank: number,
   liquidityAmount: number
 ): string {
-  const title = (market.groupItemTitle || market.question).slice(0, 40);
-  const paddedTitle = title.padEnd(40);
+  const title = (market.groupItemTitle || market.question).slice(0, 35);
+  const paddedTitle = title.padEnd(35);
 
   // Estimated daily earnings
   const estDaily = market.earningPotential.estimatedDailyEarnings;
@@ -96,15 +119,20 @@ function formatMarketRow(
   const sizeStr = market.rewardsMinSize.toFixed(0);
   const paddedSize = sizeStr.padStart(4);
 
-  return `${String(rank).padStart(3)}. ${paddedTitle} | ${paddedEstDaily} | ${paddedPool} | ${paddedComp} | ${paddedSpread} | ${paddedSize}`;
+  // YES token price
+  const yesPrice = market.midpoint ?? 0.5;
+  const yesStr = `${(yesPrice * 100).toFixed(0)}c`;
+  const paddedYes = yesStr.padStart(4);
+
+  return `${String(rank).padStart(3)}. ${paddedTitle} | ${paddedEstDaily} | ${paddedPool} | ${paddedComp} | ${paddedSpread} | ${paddedSize} | ${paddedYes}`;
 }
 
 /**
  * Formats the header for the markets table.
  */
 function formatTableHeader(liquidityAmount: number): string {
-  const header = `  #  Market                                      | Est/day | Pool   |   Comp | Sprd | Size`;
-  const subheader = `                                                | ($${liquidityAmount})  |        |        |      |     `;
+  const header = `  #  Market                                  | Est/day | Pool   |   Comp | Sprd | Size | YES$`;
+  const subheader = `                                            | ($${liquidityAmount})  |        |        |      |      |     `;
   const separator = "-".repeat(header.length);
   return `${header}\n${subheader}\n${separator}`;
 }
@@ -120,9 +148,9 @@ function formatResults(
   const lines: string[] = [];
 
   lines.push("");
-  lines.push("=".repeat(97));
+  lines.push("=".repeat(102));
   lines.push(`  TOP MARKETS FOR LIQUIDITY REWARDS (with $${liquidityAmount} liquidity)`);
-  lines.push("=".repeat(97));
+  lines.push("=".repeat(102));
   lines.push("");
   lines.push(
     "Ranking based on estimated daily earnings using Polymarket's quadratic reward formula."
@@ -139,7 +167,7 @@ function formatResults(
   });
 
   lines.push("");
-  lines.push("-".repeat(97));
+  lines.push("-".repeat(102));
   lines.push("");
   lines.push("Legend:");
   lines.push(
@@ -151,6 +179,10 @@ function formatResults(
   );
   lines.push("  Sprd    = Max spread from midpoint for rewards (higher = more forgiving)");
   lines.push("  Size    = Min order size for rewards in shares (lower = easier)");
+  lines.push("  YES$    = Current YES token price (used to calculate shares from liquidity)");
+  lines.push("");
+  lines.push("Note: Markets where your liquidity can't meet minSize requirements are excluded.");
+  lines.push("      Markets with midpoint outside [10%, 90%] require two-sided liquidity.");
   lines.push("");
   lines.push("To use a market, run:");
   lines.push("  npm run selectMarket -- <event-slug>");
@@ -168,6 +200,9 @@ function formatMarketDetails(
 ): string {
   const lines: string[] = [];
   const title = market.groupItemTitle || market.question;
+  const yesPrice = market.midpoint ?? 0.5;
+  const noPrice = 1 - yesPrice;
+  const twoSidedRequired = yesPrice < 0.1 || yesPrice > 0.9;
 
   lines.push("");
   lines.push(`Market: ${title}`);
@@ -192,9 +227,25 @@ function formatMarketDetails(
   lines.push(`  Min Size: ${market.rewardsMinSize} shares`);
   lines.push("");
   lines.push("Market Stats:");
+  lines.push(`  YES Token Price: ${(yesPrice * 100).toFixed(1)}c ($${yesPrice.toFixed(3)})`);
+  lines.push(`  NO Token Price:  ${(noPrice * 100).toFixed(1)}c ($${noPrice.toFixed(3)})`);
+  lines.push(`  Two-Sided Required: ${twoSidedRequired ? "YES (price outside 10-90c)" : "No"}`);
   lines.push(`  24h Volume: ${formatCurrency(market.volume24hr)}`);
   if (market.spread !== undefined) {
     lines.push(`  Current Spread: ${market.spread} cents`);
+  }
+  lines.push("");
+  lines.push("Liquidity Calculation:");
+  if (twoSidedRequired) {
+    const halfLiq = liquidityAmount / 2;
+    const yesShares = halfLiq / yesPrice;
+    const noShares = halfLiq / noPrice;
+    lines.push(`  $${liquidityAmount} split 50/50 between YES and NO sides:`);
+    lines.push(`    YES side: $${halfLiq.toFixed(0)} / ${(yesPrice * 100).toFixed(1)}c = ${yesShares.toFixed(0)} shares`);
+    lines.push(`    NO side:  $${halfLiq.toFixed(0)} / ${(noPrice * 100).toFixed(1)}c = ${noShares.toFixed(0)} shares`);
+  } else {
+    const shares = liquidityAmount / yesPrice;
+    lines.push(`  $${liquidityAmount} / ${(yesPrice * 100).toFixed(1)}c = ${shares.toFixed(0)} shares`);
   }
   lines.push("");
   lines.push("Score Breakdown:");
@@ -279,26 +330,104 @@ async function main(): Promise<void> {
   const { limit, maxMinSize, liquidity, json, details } = parseArgs();
 
   try {
-    console.log("\nFetching markets with active reward programs...\n");
+    // Only show progress for non-JSON output
+    if (!json) {
+      console.log("\nFetching markets with active reward programs...");
+    }
 
     const options: FetchMarketsWithRewardsOptions = {
-      limit: 500, // Fetch more to capture all reward markets
       maxMinSize: maxMinSize ?? undefined,
+      liquidityAmount: liquidity, // Early filter by liquidity compatibility
+      onProgress: json ? undefined : (fetched, total, filtered) => {
+        // Clear line and show progress
+        process.stdout.write(`\r  Fetched ${fetched}/${total} markets, ${filtered} compatible...`);
+      },
     };
 
     const markets = await fetchMarketsWithRewards(options);
+    
+    // Clear progress line
+    if (!json) {
+      process.stdout.write("\r" + " ".repeat(60) + "\r");
+      console.log(`Found ${markets.length} compatible markets (from API total)`);
+    }
 
     if (markets.length === 0) {
-      console.log("No markets found with active reward programs.");
-      console.log("Try adjusting --max-size filter.");
+      if (!json) {
+        console.log("No markets found with active reward programs.");
+        console.log("Try adjusting --max-size or --liquidity filters.");
+      }
       process.exit(1);
     }
 
-    const rankedMarkets = rankMarketsByEarnings(markets, liquidity);
+    // Fetch real competition from orderbooks
+    if (!json) {
+      console.log("\nFetching orderbooks to calculate real competition...");
+    }
+
+    // Prepare markets for competition fetch
+    const marketsForCompetition: MarketForCompetition[] = markets
+      .map((m) => {
+        const tokenId = getFirstTokenId(m);
+        if (!tokenId || !m.midpoint) return null;
+        return {
+          tokenId,
+          conditionId: m.conditionId,
+          midpoint: m.midpoint,
+          maxSpreadCents: m.rewardsMaxSpread,
+          minSize: m.rewardsMinSize,
+        };
+      })
+      .filter((m): m is MarketForCompetition => m !== null);
+
+    const competitionMap = await fetchBatchCompetition(marketsForCompetition, {
+      batchSize: 20, // Fetch 20 orderbooks in parallel
+      onProgress: json ? undefined : (fetched, total) => {
+        process.stdout.write(`\r  Fetched ${fetched}/${total} orderbooks...`);
+      },
+    });
+
+    // Clear progress line
+    if (!json) {
+      process.stdout.write("\r" + " ".repeat(60) + "\r");
+      console.log(`Fetched ${competitionMap.size} orderbooks\n`);
+    }
+
+    // Update markets with real competition
+    const marketsWithRealCompetition = markets.map((m) => {
+      const qScore = competitionMap.get(m.conditionId);
+      if (qScore) {
+        // Use the effective Q_min as competition
+        // For two-sided markets, this is min(bidScore, askScore)
+        // For single-sided, we need to apply the scaling factor
+        const midpoint = m.midpoint ?? 0.5;
+        const twoSidedRequired = midpoint < 0.1 || midpoint > 0.9;
+        
+        let effectiveCompetition: number;
+        if (twoSidedRequired) {
+          // Strict two-sided: use min
+          effectiveCompetition = qScore.totalQMin;
+        } else {
+          // Single-sided allowed with 3x penalty
+          // Q_min = max(min(Q_one, Q_two), max(Q_one/3, Q_two/3))
+          effectiveCompetition = Math.max(
+            qScore.totalQMin,
+            Math.max(qScore.totalBidScore / 3, qScore.totalAskScore / 3)
+          );
+        }
+        
+        return { ...m, competitive: effectiveCompetition };
+      }
+      return m;
+    });
+
+    const rankedMarkets = rankMarketsByEarnings(marketsWithRealCompetition, liquidity);
 
     if (rankedMarkets.length === 0) {
-      console.log("No markets with valid earning potential found.");
-      console.log("Markets may be missing competitiveness or daily reward data.");
+      if (!json) {
+        console.log("No markets with valid earning potential found.");
+        console.log("Markets may be missing competitiveness or daily reward data.");
+      }
       process.exit(1);
     }
 
@@ -320,13 +449,8 @@ async function main(): Promise<void> {
     }
 
     // Table output
-    const filterStr =
-      maxMinSize !== null ? ` (min shares <= ${maxMinSize})` : "";
     console.log(
-      `Found ${markets.length} markets with active rewards${filterStr}`
-    );
-    console.log(
-      `Showing ${Math.min(limit, rankedMarkets.length)} markets with earning potential`
+      `Showing ${Math.min(limit, rankedMarkets.length)} of ${rankedMarkets.length} markets with earning potential`
     );
     console.log(formatResults(rankedMarkets, limit, liquidity));
   } catch (error) {

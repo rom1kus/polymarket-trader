@@ -392,16 +392,16 @@ export function formatRewardResults(results: RewardCheckResult[]): string {
 
     lines.push("\n  SUMMARY:");
     lines.push("  " + "-".repeat(66));
-    lines.push(`  BUY Score:  ${result.totalBuyScore.toFixed(2)}`);
-    lines.push(`  SELL Score: ${result.totalSellScore.toFixed(2)}`);
+    lines.push(`  Q_one (bid side): ${result.qOne.toFixed(2)}`);
+    lines.push(`  Q_two (ask side): ${result.qTwo.toFixed(2)}`);
 
-    if (!result.twoSidedRequired && (!result.hasBuySide || !result.hasSellSide)) {
+    if (!result.twoSidedRequired && (!result.hasQOne || !result.hasQTwo)) {
       lines.push(
-        `  Single-sided penalty: /${result.scalingFactor} (midpoint ${(result.market.midpoint * 100).toFixed(1)}¢ allows single-sided)`
+        `  Single-sided penalty: /${result.scalingFactor} (midpoint ${(result.market.midpoint * 100).toFixed(1)}% allows single-sided)`
       );
     }
 
-    lines.push(`  Effective Score: ${result.effectiveScore.toFixed(2)}`);
+    lines.push(`  Q_min (effective): ${result.effectiveScore.toFixed(2)}`);
     lines.push(`\n  >>> ${result.summary}`);
   }
 
@@ -455,13 +455,13 @@ export function formatRewardResultsWithEarnings(
 
     lines.push("\n  SCORES:");
     lines.push("  " + "-".repeat(66));
-    lines.push(`  Your Bid Side Score:  ${result.totalBuyScore.toFixed(2)}`);
-    lines.push(`  Your Ask Side Score:  ${result.totalSellScore.toFixed(2)}`);
-    lines.push(`  Your Q_min:           ${result.effectiveScore.toFixed(2)}`);
+    lines.push(`  Your Q_one (bid side): ${result.qOne.toFixed(2)}`);
+    lines.push(`  Your Q_two (ask side): ${result.qTwo.toFixed(2)}`);
+    lines.push(`  Your Q_min:            ${result.effectiveScore.toFixed(2)}`);
 
     lines.push("");
-    lines.push(`  Order Book Bid Q:     ${result.orderBookBidScore.toFixed(2)}`);
-    lines.push(`  Order Book Ask Q:     ${result.orderBookAskScore.toFixed(2)}`);
+    lines.push(`  Order Book Q_one:      ${result.orderBookQOne.toFixed(2)}`);
+    lines.push(`  Order Book Q_two:      ${result.orderBookQTwo.toFixed(2)}`);
     lines.push(`  Market Competitiveness (API): ${result.totalQMin.toFixed(2)}`);
 
     lines.push("\n  EARNING PERCENTAGE:");

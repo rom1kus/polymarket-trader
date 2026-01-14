@@ -250,6 +250,10 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<voi
 
       try {
         await userWs.connect();
+        // Small delay to ensure auth is processed before placing orders
+        // This prevents a race condition where fills could be missed
+        await new Promise(resolve => setTimeout(resolve, 500));
+        log("User WebSocket ready for fill tracking");
       } catch (error) {
         log(`User WebSocket connection failed: ${error}`);
         // Continue without user WebSocket - position tracking will be stale
