@@ -88,13 +88,27 @@ function rankMarketsByEarnings(
 /**
  * Formats a single market for console display.
  */
+const MARKET_TITLE_WIDTH = 53;
+const TRUNCATION_SEPARATOR = "...";
+
+function truncateMiddle(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+
+  const available = Math.max(maxLength - TRUNCATION_SEPARATOR.length, 1);
+  const startLength = Math.ceil(available / 2);
+  const endLength = Math.floor(available / 2);
+  const start = value.slice(0, startLength);
+  const end = value.slice(value.length - endLength);
+  return `${start}${TRUNCATION_SEPARATOR}${end}`;
+}
+
 function formatMarketRow(
   market: RankedMarketByEarnings,
   rank: number,
   liquidityAmount: number
 ): string {
-  const title = (market.groupItemTitle || market.question).slice(0, 35);
-  const paddedTitle = title.padEnd(35);
+  const title = truncateMiddle(market.groupItemTitle || market.question, MARKET_TITLE_WIDTH);
+  const paddedTitle = title.padEnd(MARKET_TITLE_WIDTH);
 
   // Estimated daily earnings
   const estDaily = market.earningPotential.estimatedDailyEarnings;
@@ -131,8 +145,8 @@ function formatMarketRow(
  * Formats the header for the markets table.
  */
 function formatTableHeader(liquidityAmount: number): string {
-  const header = `  #  Market                                  | Est/day | Pool   |   Comp | Sprd | Size | YES$`;
-  const subheader = `                                            | ($${liquidityAmount})  |        |        |      |      |     `;
+  const header = `  #  Market${" ".repeat(MARKET_TITLE_WIDTH - "Market".length)} | Est/day | Pool   |   Comp | Sprd | Size | YES$`;
+  const subheader = `  ${" ".repeat(MARKET_TITLE_WIDTH + 3)}| ($${liquidityAmount})  |        |        |      |      |     `;
   const separator = "-".repeat(header.length);
   return `${header}\n${subheader}\n${separator}`;
 }
@@ -148,9 +162,11 @@ function formatResults(
   const lines: string[] = [];
 
   lines.push("");
-  lines.push("=".repeat(102));
+  const tableWidth = formatTableHeader(liquidityAmount).split("\n")[0].length;
+
+  lines.push("=".repeat(tableWidth));
   lines.push(`  TOP MARKETS FOR LIQUIDITY REWARDS (with $${liquidityAmount} liquidity)`);
-  lines.push("=".repeat(102));
+  lines.push("=".repeat(tableWidth));
   lines.push("");
   lines.push(
     "Ranking based on estimated daily earnings using Polymarket's quadratic reward formula."
@@ -167,7 +183,7 @@ function formatResults(
   });
 
   lines.push("");
-  lines.push("-".repeat(102));
+  lines.push("-".repeat(tableWidth));
   lines.push("");
   lines.push("Legend:");
   lines.push(
