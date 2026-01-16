@@ -121,18 +121,88 @@ export interface PositionLimitStatus {
 }
 
 // =============================================================================
+// Economics Types
+// =============================================================================
+
+/**
+ * Cumulative fill economics for P&L tracking.
+ *
+ * Tracks total bought/sold and cost/proceeds for each token type.
+ * Uses weighted average cost basis for realized P&L calculation.
+ */
+export interface FillEconomics {
+  /** Cumulative YES tokens bought */
+  totalYesBought: number;
+  /** Cumulative YES tokens sold */
+  totalYesSold: number;
+  /** Cumulative NO tokens bought */
+  totalNoBought: number;
+  /** Cumulative NO tokens sold */
+  totalNoSold: number;
+  /** Sum of (price × size) for all YES buys - total cost basis */
+  totalYesCost: number;
+  /** Sum of (price × size) for all YES sells - total proceeds */
+  totalYesProceeds: number;
+  /** Sum of (price × size) for all NO buys - total cost basis */
+  totalNoCost: number;
+  /** Sum of (price × size) for all NO sells - total proceeds */
+  totalNoProceeds: number;
+  /** Accumulated realized P&L from completed round-trips */
+  realizedPnL: number;
+}
+
+/**
+ * Creates an empty FillEconomics object with all values initialized to 0.
+ */
+export function createEmptyEconomics(): FillEconomics {
+  return {
+    totalYesBought: 0,
+    totalYesSold: 0,
+    totalNoBought: 0,
+    totalNoSold: 0,
+    totalYesCost: 0,
+    totalYesProceeds: 0,
+    totalNoCost: 0,
+    totalNoProceeds: 0,
+    realizedPnL: 0,
+  };
+}
+
+/**
+ * User-provided initial cost basis for pre-existing positions.
+ *
+ * When the bot starts with tokens that weren't acquired through tracked fills,
+ * the user can provide the average cost they paid.
+ */
+export interface InitialCostBasis {
+  /** Average cost per YES token (0-1), null if none held */
+  yesAvgCost: number | null;
+  /** Average cost per NO token (0-1), null if none held */
+  noAvgCost: number | null;
+  /** Timestamp when cost basis was provided */
+  timestamp: number;
+}
+
+// =============================================================================
 // Persistence Types
 // =============================================================================
+
+/** Current schema version for PersistedMarketState */
+export const PERSISTED_STATE_VERSION = 2;
 
 /**
  * Persisted state for a market.
  *
  * Saved to disk as JSON for recovery across bot restarts.
  * One file per market: ./data/fills-{conditionId}.json
+ *
+ * Version history:
+ * - v1: Initial version with fills and position tracking
+ * - v2: Added economics for P&L tracking, initialCostBasis for pre-existing positions
  */
 export interface PersistedMarketState {
-  /** Schema version for future migrations */
-  version: 1;
+  /** Schema version for migrations (current: 2) */
+  version: typeof PERSISTED_STATE_VERSION;
   /** Market condition ID */
   conditionId: string;
   /** YES token ID */
@@ -152,6 +222,16 @@ export interface PersistedMarketState {
     noTokens: number;
     timestamp: number;
   };
+  /**
+   * Cumulative fill economics for P&L tracking.
+   * Added in v2. May be undefined in migrated v1 data (will be rebuilt from fills).
+   */
+  economics?: FillEconomics;
+  /**
+   * User-provided cost basis for pre-existing positions.
+   * Used when initial position exists but wasn't acquired through tracked fills.
+   */
+  initialCostBasis?: InitialCostBasis;
 }
 
 // =============================================================================

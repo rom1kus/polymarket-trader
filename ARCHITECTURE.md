@@ -147,14 +147,18 @@ Types for position tracking:
 - `PositionsSummary` - Summary of all positions across multiple markets
 
 #### `src/types/fills.ts`
-Types for fill tracking and position limits:
+Types for fill tracking, position limits, and P&L economics:
 - `Fill` - Trade fill event (id, tokenId, side, price, size, timestamp, outcome)
+- `FillEconomics` - Cumulative P&L tracking (totalBought/Sold, totalCost/Proceeds, realizedPnL)
+- `InitialCostBasis` - User-provided cost basis for pre-existing positions
 - `PositionState` - Current position state (yesTokens, noTokens, netExposure)
 - `PositionLimitsConfig` - Position limit settings (maxNetExposure, warnThreshold)
 - `QuoteSideCheck` - Result of checking if a side can be quoted
 - `PositionLimitStatus` - Current status relative to limits
 - `ReconciliationResult` - Result of reconciling persisted vs actual position
-- `PersistedMarketState` - Schema for JSON file storage
+- `PersistedMarketState` - Schema v2 for JSON file storage (fills, economics, initialCostBasis)
+- `createEmptyEconomics()` - Factory function for new FillEconomics
+- `PERSISTED_STATE_VERSION` - Current schema version (2)
 
 #### `src/types/websocket.ts`
 Types for Polymarket WebSocket API (`wss://ws-subscriptions-clob.polymarket.com`):
@@ -325,6 +329,8 @@ Common helper utilities:
 - `formatTimestamp(date?)` - Formats timestamp for logging
 - `createLogger(prefix?)` - Creates a prefixed logger function
 - `log(message)` - Simple timestamped logger
+- `promptForInput(question)` - Prompts user for text input from stdin
+- `promptForNumber(question, min, max)` - Prompts for validated numeric input
 
 #### `src/utils/websocket.ts`
 Polymarket WebSocket manager for real-time market data:
@@ -407,24 +413,46 @@ did (bought or sold), rather than incorrectly inferring from the taker's perspec
 
 #### `src/utils/storage.ts`
 JSON file persistence for position tracking data:
-- `loadMarketState(conditionId)` - Loads persisted state from disk
+- `loadMarketState(conditionId)` - Loads persisted state from disk (handles v1→v2 migration)
 - `saveMarketState(state)` - Saves state to disk
-- `createEmptyState(conditionId, yesTokenId, noTokenId)` - Creates new state
+- `createEmptyState(conditionId, yesTokenId, noTokenId)` - Creates new state with initialized economics
 - `appendFill(conditionId, yesTokenId, noTokenId, fill)` - Appends a fill
 - `setInitialPosition(conditionId, yesTokenId, noTokenId, yes, no)` - Sets initial position
+- `rebuildEconomicsFromFills(fills, yesTokenId)` - Rebuilds FillEconomics from fill history
+- `saveEconomics(conditionId, yesTokenId, noTokenId, economics)` - Updates economics in state
 
 **Storage Location:** `./data/fills-{conditionId}.json`
 
+**Schema Version:** 2 (auto-migrates from v1 by rebuilding economics)
+
+**Schema Migration Requirements:**
+When modifying `PersistedMarketState`:
+1. Increment `PERSISTED_STATE_VERSION` in `src/types/fills.ts`
+2. Add migration logic in `loadMarketState()` in `src/utils/storage.ts`
+3. Test with existing data files before deploying
+4. Document version changes in storage.ts header comment
+
 #### `src/utils/positionTracker.ts`
-Position tracking for market making strategies:
-- `PositionTracker` - Class for tracking YES/NO positions and enforcing limits
-  - `initialize(yesBalance, noBalance)` - Initialize from current balances
-  - `processFill(fill)` - Process a fill and update position
+Position tracking for market making strategies with P&L economics:
+- `PositionTracker` - Class for tracking YES/NO positions, limits, and P&L
+  - `initialize(yesBalance, noBalance)` - Initialize from current balances, returns `needsCostBasis` flag
+  - `processFill(fill)` - Process a fill, update position and economics
   - `canQuoteBuy()` - Check if BUY side is allowed
   - `canQuoteSell()` - Check if SELL side is allowed
   - `getPositionState()` - Get current position state
+  - `getNetExposure()` - Get net exposure (yesTokens - noTokens)
   - `getLimitStatus()` - Get limit utilization status
   - `formatStatus()` - Format position for display
+  - **P&L Methods (new):**
+  - `getAverageCost(tokenType)` - Get weighted average cost per token type
+  - `getUnrealizedPnL(midpoint)` - Mark-to-market P&L
+  - `getRealizedPnL()` - Accumulated realized P&L from sells
+  - `getTotalPnL(midpoint)` - Unrealized + realized P&L
+  - `getEconomics()` - Get raw FillEconomics data
+  - `formatPnLStatus(midpoint)` - Detailed P&L display (on fills)
+  - `formatPnLCompact(midpoint)` - Compact P&L display (on rebalance)
+  - `setInitialCostBasis(yesCost, noCost)` - Set cost basis for pre-existing tokens
+  - `needsInitialCostBasis()` - Check if cost basis input is needed
 - `createPositionTracker(conditionId, yesTokenId, noTokenId, maxNetExposure)` - Factory function
 
 **Position Limits:**
@@ -432,6 +460,11 @@ Position tracking for market making strategies:
 - Positive = long YES, Negative = long NO
 - Blocks BUY when exposure >= maxNetExposure
 - Blocks SELL when exposure <= -maxNetExposure
+
+**P&L Calculation:**
+- Uses weighted average cost basis
+- Unrealized P&L: `position × (currentPrice - avgCost)`
+- Realized P&L: Accumulated when selling at `(salePrice - avgCost) × size`
 
 ### `src/scripts/`
 Directory for executable utility scripts. Each script should:
@@ -608,4 +641,4 @@ The Safe SDK (`@safe-global/protocol-kit`) handles:
 - All utilities in `src/utils/`
 
 ---
-*Last updated: 2026-01-16 - Updated market-maker-roadmap.md with implementation phases for P&L tracking, inventory-skewed quoting, and stop-loss*
+*Last updated: 2026-01-16 - Implemented Phase 1: Fill Economics & P&L Tracking (FillEconomics type, PositionTracker P&L methods, initial cost basis prompting, P&L logging on fills/rebalances)*

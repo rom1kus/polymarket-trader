@@ -52,12 +52,12 @@ Fix before next production run.
 
 ### Risk Management
 - [x] Fill tracking (real-time via user WebSocket)
-- [ ] Fill economics tracking *(see Phase 1 below)*
-  - [ ] Average cost calculation per token type
-  - [ ] Unrealized P&L (mark-to-market)
-  - [ ] Realized P&L (completed round-trips)
-  - [ ] Total P&L display in logs
-  - [ ] Persist economics across restarts
+- [x] Fill economics tracking *(Phase 1 - COMPLETED)*
+  - [x] Average cost calculation per token type
+  - [x] Unrealized P&L (mark-to-market)
+  - [x] Realized P&L (completed round-trips)
+  - [x] Total P&L display in logs
+  - [x] Persist economics across restarts
 - [ ] Stop-loss with position liquidation *(see Phase 3 below)*
   - [ ] Max unrealized loss threshold
   - [ ] Max daily loss threshold  
@@ -183,8 +183,9 @@ correctly blocked further NO purchases and went single-sided, only quoting YES.
 
 Detailed implementation plans for major features. Each phase builds on the previous.
 
-### Phase 1: Fill Economics & P&L Tracking
+### Phase 1: Fill Economics & P&L Tracking - COMPLETED
 **Priority: HIGH | Effort: Medium | Impact: High**
+**Status: IMPLEMENTED (2026-01-16)**
 
 **Problem:** Fills are tracked but their economic impact is not calculated. We don't know:
 - What's our average cost for YES/NO tokens?

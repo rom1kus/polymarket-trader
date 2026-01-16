@@ -3,17 +3,37 @@
  *
  * Stores fill history and position state as JSON files in ./data/ directory.
  * One file per market: ./data/fills-{conditionId}.json
+ *
+ * ## Schema Versioning
+ *
+ * The persisted state uses a `version` field for schema migrations.
+ * Current version: 2 (defined in `PERSISTED_STATE_VERSION` from types/fills.ts)
+ *
+ * ### Migration Requirements
+ *
+ * When changing the `PersistedMarketState` schema:
+ *
+ * 1. Increment `PERSISTED_STATE_VERSION` in `src/types/fills.ts`
+ * 2. Add migration logic in `loadMarketState()` to handle old versions
+ * 3. Migrations should be non-destructive (preserve existing data)
+ * 4. Test migration with existing data files before deploying
+ *
+ * ### Version History
+ *
+ * - v1: Initial schema (fills, initialPosition)
+ * - v2: Added `economics` for P&L tracking, `initialCostBasis` for pre-existing positions
  */
 
 import fs from "fs";
 import path from "path";
-import type { Fill, PersistedMarketState } from "@/types/fills.js";
+import type { Fill, FillEconomics, PersistedMarketState } from "@/types/fills.js";
+import { createEmptyEconomics, PERSISTED_STATE_VERSION } from "@/types/fills.js";
 
 /** Default data directory relative to project root */
 const DATA_DIR = "./data";
 
-/** Current schema version */
-const SCHEMA_VERSION = 1;
+/** Current schema version - imported from types for consistency */
+const SCHEMA_VERSION = PERSISTED_STATE_VERSION;
 
 /**
  * Ensures the data directory exists.
@@ -39,6 +59,8 @@ export function getStoragePath(conditionId: string): string {
 /**
  * Loads persisted market state from disk.
  *
+ * Handles schema migration from v1 to v2 by rebuilding economics from fills.
+ *
  * @param conditionId - Market condition ID
  * @returns Persisted state or null if not found
  */
@@ -51,7 +73,29 @@ export function loadMarketState(conditionId: string): PersistedMarketState | nul
 
   try {
     const content = fs.readFileSync(filePath, "utf-8");
-    const state = JSON.parse(content) as PersistedMarketState;
+    const rawState = JSON.parse(content);
+
+    // Handle schema migration
+    if (rawState.version === 1) {
+      console.log(
+        `[Storage] Migrating from schema v1 to v${SCHEMA_VERSION}. Rebuilding economics from fills.`
+      );
+      // Rebuild economics from fills for v1 data
+      const yesTokenId = rawState.yesTokenId;
+      const economics = rebuildEconomicsFromFills(rawState.fills || [], yesTokenId);
+
+      const migratedState: PersistedMarketState = {
+        ...rawState,
+        version: SCHEMA_VERSION,
+        economics,
+      };
+
+      // Save migrated state
+      saveMarketState(migratedState);
+      return migratedState;
+    }
+
+    const state = rawState as PersistedMarketState;
 
     // Validate schema version
     if (state.version !== SCHEMA_VERSION) {
@@ -107,7 +151,7 @@ export function saveMarketState(state: PersistedMarketState): void {
  * @param conditionId - Market condition ID
  * @param yesTokenId - YES token ID
  * @param noTokenId - NO token ID
- * @returns New persisted state
+ * @returns New persisted state with initialized economics
  */
 export function createEmptyState(
   conditionId: string,
@@ -121,6 +165,7 @@ export function createEmptyState(
     noTokenId,
     fills: [],
     lastUpdated: Date.now(),
+    economics: createEmptyEconomics(),
   };
 }
 
@@ -250,4 +295,98 @@ export function clearMarketState(conditionId: string): boolean {
   }
 
   return false;
+}
+
+// =============================================================================
+// Economics Helpers
+// =============================================================================
+
+/**
+ * Rebuilds FillEconomics from a list of fills.
+ *
+ * Used for:
+ * - Migrating v1 data to v2 (fills exist but no economics)
+ * - Recovering from corrupted economics data
+ * - Recalculating if economics drift from fills
+ *
+ * Uses weighted average cost basis for realized P&L calculation.
+ *
+ * @param fills - Array of fills to process
+ * @param yesTokenId - YES token ID to identify YES vs NO fills
+ * @returns Rebuilt FillEconomics
+ */
+export function rebuildEconomicsFromFills(fills: Fill[], yesTokenId: string): FillEconomics {
+  const economics = createEmptyEconomics();
+
+  // Sort fills by timestamp to process in order (important for realized P&L)
+  const sortedFills = [...fills].sort((a, b) => a.timestamp - b.timestamp);
+
+  for (const fill of sortedFills) {
+    // Skip failed fills
+    if (fill.status === "FAILED") continue;
+
+    const isYes = fill.tokenId === yesTokenId;
+    const cost = fill.price * fill.size;
+
+    if (isYes) {
+      if (fill.side === "BUY") {
+        economics.totalYesBought += fill.size;
+        economics.totalYesCost += cost;
+      } else {
+        // SELL YES - calculate realized P&L using weighted average
+        economics.totalYesSold += fill.size;
+        economics.totalYesProceeds += cost;
+
+        // Calculate realized P&L for this sell
+        if (economics.totalYesBought > 0) {
+          const avgCost = economics.totalYesCost / economics.totalYesBought;
+          const realizedFromSale = (fill.price - avgCost) * fill.size;
+          economics.realizedPnL += realizedFromSale;
+        }
+      }
+    } else {
+      // NO token
+      if (fill.side === "BUY") {
+        economics.totalNoBought += fill.size;
+        economics.totalNoCost += cost;
+      } else {
+        // SELL NO - calculate realized P&L using weighted average
+        economics.totalNoSold += fill.size;
+        economics.totalNoProceeds += cost;
+
+        // Calculate realized P&L for this sell
+        if (economics.totalNoBought > 0) {
+          const avgCost = economics.totalNoCost / economics.totalNoBought;
+          const realizedFromSale = (fill.price - avgCost) * fill.size;
+          economics.realizedPnL += realizedFromSale;
+        }
+      }
+    }
+  }
+
+  return economics;
+}
+
+/**
+ * Updates economics state and saves to disk.
+ *
+ * @param conditionId - Market condition ID
+ * @param yesTokenId - YES token ID
+ * @param noTokenId - NO token ID
+ * @param economics - Updated economics to save
+ */
+export function saveEconomics(
+  conditionId: string,
+  yesTokenId: string,
+  noTokenId: string,
+  economics: FillEconomics
+): void {
+  let state = loadMarketState(conditionId);
+
+  if (!state) {
+    state = createEmptyState(conditionId, yesTokenId, noTokenId);
+  }
+
+  state.economics = economics;
+  saveMarketState(state);
 }

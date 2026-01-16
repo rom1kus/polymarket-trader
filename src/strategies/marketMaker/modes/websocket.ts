@@ -56,7 +56,13 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<voi
 
     try {
       state.cycleCount++;
-      log(`Rebalance #${state.cycleCount} | Midpoint: $${midpoint.toFixed(4)} (via ${source})`);
+      
+      // Build rebalance log line with P&L if position tracking is enabled
+      let logLine = `Rebalance #${state.cycleCount} | Mid: $${midpoint.toFixed(4)} (${source})`;
+      if (positionTracker) {
+        logLine += ` | ${positionTracker.formatPnLCompact(midpoint)}`;
+      }
+      log(logLine);
 
       // Check if we need to rebalance
       const hasQuotes = state.activeQuotes.yesQuote !== null || state.activeQuotes.noQuote !== null;
@@ -231,6 +237,10 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<voi
             const isNew = positionTracker.processFill(fill);
             
             if (isNew) {
+              // Log P&L after fill (uses current midpoint)
+              const currentMidpoint = debounce.getLatestValue() ?? 0.5;
+              log(positionTracker.formatPnLStatus(currentMidpoint));
+              
               // Check if position limits status changed AFTER processing fill
               const limitStatusAfter = positionTracker.getLimitStatus();
               

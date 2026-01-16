@@ -2,7 +2,7 @@
  * Market Maker Lifecycle - Startup, shutdown, and validation functions.
  */
 
-import { log } from "@/utils/helpers.js";
+import { log, promptForNumber } from "@/utils/helpers.js";
 import { cancelOrdersForToken } from "@/utils/orders.js";
 import { getTokenBalance } from "@/utils/balance.js";
 import { PositionTracker } from "@/utils/positionTracker.js";
@@ -133,6 +133,9 @@ export function registerShutdownHandlers(handler: () => Promise<void>): void {
  * the tracker with the current position. On subsequent runs, it will
  * also reconcile with persisted fills.
  *
+ * If the position has pre-existing tokens without cost basis, prompts
+ * the user to provide average cost for P&L tracking.
+ *
  * @param client - Authenticated CLOB client
  * @param config - Market maker configuration
  * @returns Initialized position tracker, or null if position limits disabled
@@ -179,9 +182,63 @@ export async function createPositionTracker(
     log(`Position reconciliation warning: ${result.warning}`);
   }
 
+  // Check if we need cost basis for pre-existing position
+  if (result.needsCostBasis && tracker.needsInitialCostBasis()) {
+    await promptForInitialCostBasis(tracker, yesInfo.balanceNumber, noInfo.balanceNumber);
+  }
+
   // Log position summary
   log("Position status:\n" + tracker.formatStatus());
 
   return tracker;
+}
+
+/**
+ * Prompts the user to enter initial cost basis for pre-existing tokens.
+ *
+ * This is called when the bot starts with tokens that weren't acquired
+ * through tracked fills.
+ *
+ * @param tracker - Position tracker to set cost basis on
+ * @param yesBalance - Current YES token balance
+ * @param noBalance - Current NO token balance
+ */
+async function promptForInitialCostBasis(
+  tracker: PositionTracker,
+  yesBalance: number,
+  noBalance: number
+): Promise<void> {
+  console.log("\n" + "-".repeat(60));
+  console.log("  INITIAL COST BASIS REQUIRED");
+  console.log("-".repeat(60));
+  console.log("  You have pre-existing tokens without cost basis information.");
+  console.log("  For accurate P&L tracking, please provide the average cost");
+  console.log("  you paid for these tokens (0-1, e.g., 0.52 for 52 cents).");
+  console.log("  Enter 'skip' or press Enter to use N/A (P&L will be incomplete).");
+  console.log("-".repeat(60) + "\n");
+
+  let yesCost: number | null = null;
+  let noCost: number | null = null;
+
+  if (yesBalance > 0.001) {
+    yesCost = await promptForNumber(
+      `  YES tokens (${yesBalance.toFixed(2)}) - Enter average cost (0-1) or skip: `,
+      0,
+      1
+    );
+  }
+
+  if (noBalance > 0.001) {
+    noCost = await promptForNumber(
+      `  NO tokens (${noBalance.toFixed(2)}) - Enter average cost (0-1) or skip: `,
+      0,
+      1
+    );
+  }
+
+  // Set the cost basis (even if both null, this records user was prompted)
+  tracker.setInitialCostBasis(yesCost, noCost);
+
+  console.log("-".repeat(60) + "\n");
 }
 
