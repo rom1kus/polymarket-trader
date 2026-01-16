@@ -148,7 +148,7 @@ Types for position tracking:
 
 #### `src/types/fills.ts`
 Types for fill tracking and position limits:
-- `Fill` - Trade fill event (id, tokenId, side, price, size, timestamp)
+- `Fill` - Trade fill event (id, tokenId, side, price, size, timestamp, outcome)
 - `PositionState` - Current position state (yesTokens, noTokens, netExposure)
 - `PositionLimitsConfig` - Position limit settings (maxNetExposure, warnThreshold)
 - `QuoteSideCheck` - Result of checking if a side can be quoted
@@ -357,7 +357,9 @@ Authenticated WebSocket manager for user-specific events:
   - `connect()` - Connects and authenticates
   - `disconnect()` - Disconnects and cleans up
   - `isConnected()` - Returns connection status
-- `tradeEventToFill(trade)` - Converts WebSocket trade event to Fill type
+- `TokenIdMapping` - Interface for YES/NO token ID mapping
+- `tradeEventToFill(trade, tokenMapping, ourApiKey, orderLookup?)` - Converts WebSocket trade event to Fill type
+- `OrderLookup` - Interface for looking up tracked order info (decouples from OrderTracker)
 
 **WebSocket Endpoint:** `wss://ws-subscriptions-clob.polymarket.com/ws/user`
 
@@ -366,6 +368,42 @@ Authenticated WebSocket manager for user-specific events:
 - Real-time fill notifications for position tracking
 - Auto-reconnect with exponential backoff
 - Ping/pong keep-alive
+
+**CRITICAL: Fill Attribution Logic:**
+The Polymarket CLOB only maintains order books for YES tokens. NO token orders are internally converted:
+- `BUY NO @ $0.58` → internally becomes `SELL YES @ $0.42` on the orderbook
+
+When WebSocket trade events arrive, we use the `maker_orders` array AND the `OrderTracker` to correctly attribute fills:
+
+1. **Check `maker_orders` first**: Each maker order has `owner` (API key), `outcome`, `price`, `matched_amount`
+2. **If we're the maker** (our API key matches an entry in `maker_orders`):
+   - Use that maker order's `outcome` to determine YES/NO token
+   - **Use `OrderTracker` to get the original order side** - this is what WE placed (BUY or SELL)
+   - Use the maker order's `price` and `matched_amount` for accurate fill details
+   - Fallback: If order not found in tracker, infer side from taker (may be incorrect for old orders)
+3. **If we're the taker** (our API key is NOT in `maker_orders`):
+   - Use trade-level fields (`outcome`, `side`, `price`, `size`) directly (taker's perspective)
+
+**Why OrderTracker is needed:** The taker's side has no relation to what we placed. If we placed
+a `BUY YES` order, when it's filled we bought YES tokens, regardless of whether the taker was
+buying or selling. The `OrderTracker` stores the original side when we place orders, ensuring
+correct attribution.
+
+#### `src/utils/orderTracker.ts`
+Order ID tracking for correct fill attribution:
+- `OrderTracker` - Class to track placed orders
+  - `trackOrder(orderId, info)` - Records order details when placed
+  - `getOrder(orderId)` - Retrieves order info by ID
+  - `removeOrder(orderId)` - Removes order from tracking
+  - `removeOrdersForToken(tokenId)` - Clears orders for a token
+  - `clear()` - Clears all tracked orders
+- `TrackedOrder` - Interface for tracked order info (tokenId, tokenType, side, price, size, placedAt)
+- `getOrderTracker()` - Gets global tracker instance
+- `resetOrderTracker()` - Resets global tracker (for testing)
+
+**Purpose:** When placing orders, we track which token (YES/NO) and side (BUY/SELL) each order was placed for.
+This is **essential** for correct fill attribution - we use the tracked `side` to know what we actually
+did (bought or sold), rather than incorrectly inferring from the taker's perspective.
 
 #### `src/utils/storage.ts`
 JSON file persistence for position tracking data:
@@ -570,4 +608,4 @@ The Safe SDK (`@safe-global/protocol-kit`) handles:
 - All utilities in `src/utils/`
 
 ---
-*Last updated: Added real orderbook competition calculation to findBestMarkets (fixes inaccurate API market_competitiveness)*
+*Last updated: Fixed tradeEventToFill to use OrderTracker for correct fill side attribution (no longer infers side from taker)*

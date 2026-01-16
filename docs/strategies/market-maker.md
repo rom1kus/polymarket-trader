@@ -15,6 +15,13 @@ The strategy operates in **USDC-only mode** - it places BUY orders on both YES a
 - Both provide the same liquidity and earn the same rewards
 - No need to pre-split USDC into YES+NO tokens via CTF
 
+**IMPORTANT - CLOB Internal Conversion:**
+The Polymarket CLOB only maintains order books for YES tokens. When you place a NO order:
+- `BUY NO @ $0.58` is internally converted to `SELL YES @ $0.42` on the orderbook
+- When filled, WebSocket events report the YES token's `asset_id`
+- The `outcome` field in trade events contains the actual outcome ("Yes" or "No")
+- Position tracking uses `outcome` to correctly attribute fills to YES or NO tokens
+
 **Benefits:**
 - No CTF split/merge operations needed during strategy lifecycle
 - Just hold USDC, no need to pre-split into YES+NO tokens

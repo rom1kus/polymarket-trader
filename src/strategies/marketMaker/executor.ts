@@ -11,6 +11,7 @@
 import { Side } from "@polymarket/clob-client";
 import { placeOrder, cancelOrdersForToken } from "@/utils/orders.js";
 import { log } from "@/utils/helpers.js";
+import { getOrderTracker } from "@/utils/orderTracker.js";
 import { generateQuotes, formatQuote, estimateRewardScore } from "./quoter.js";
 import type { ClobClient } from "@polymarket/clob-client";
 import type { MarketMakerConfig, ActiveQuotes } from "./types.js";
@@ -149,6 +150,9 @@ export async function placeQuotes(
   // Both orders are BUY orders, but on different tokens
   const orderPromises: Promise<{ token: "YES" | "NO"; result: Awaited<ReturnType<typeof placeOrder>> }>[] = [];
 
+  // Get the order tracker for tracking placed orders
+  const orderTracker = getOrderTracker();
+
   if (quoteYes) {
     orderPromises.push(
       placeOrder(client, {
@@ -186,6 +190,15 @@ export async function placeQuotes(
       if (result.success && result.orderId) {
         log(`    BUY YES placed: ${result.orderId.substring(0, 16)}...`);
         yesResult = { orderId: result.orderId, price: quotes.yesQuote.price };
+        
+        // Track the order for fill attribution
+        orderTracker.trackOrder(result.orderId, {
+          tokenId: config.market.yesTokenId,
+          tokenType: "YES",
+          side: "BUY",
+          price: quotes.yesQuote.price,
+          size: quotes.yesQuote.size,
+        });
       } else {
         log(`    BUY YES failed: ${result.errorMsg}`);
       }
@@ -193,6 +206,15 @@ export async function placeQuotes(
       if (result.success && result.orderId) {
         log(`    BUY NO placed: ${result.orderId.substring(0, 16)}...`);
         noResult = { orderId: result.orderId, price: quotes.noQuote.price };
+        
+        // Track the order for fill attribution
+        orderTracker.trackOrder(result.orderId, {
+          tokenId: config.market.noTokenId,
+          tokenType: "NO",
+          side: "BUY",
+          price: quotes.noQuote.price,
+          size: quotes.noQuote.size,
+        });
       } else {
         log(`    BUY NO failed: ${result.errorMsg}`);
       }

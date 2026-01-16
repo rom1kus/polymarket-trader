@@ -38,6 +38,8 @@ export interface Fill {
   orderId: string;
   /** Current status of the trade */
   status: FillStatus;
+  /** Outcome from WebSocket event ("Yes" or "No") - for debugging */
+  outcome?: string;
 }
 
 // =============================================================================

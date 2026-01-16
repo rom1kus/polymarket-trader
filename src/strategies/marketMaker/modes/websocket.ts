@@ -5,7 +5,8 @@
 import { log } from "@/utils/helpers.js";
 import { getMidpoint } from "@/utils/orders.js";
 import { PolymarketWebSocket, TrailingDebounce } from "@/utils/websocket.js";
-import { UserWebSocket, tradeEventToFill } from "@/utils/userWebsocket.js";
+import { UserWebSocket, tradeEventToFill, type TokenIdMapping, type OrderLookup } from "@/utils/userWebsocket.js";
+import { getOrderTracker } from "@/utils/orderTracker.js";
 import { shouldRebalance } from "../quoter.js";
 import { placeQuotes, cancelExistingOrders } from "../executor.js";
 import { createInitialState, createShutdownHandler, registerShutdownHandlers, createPositionTracker } from "../lifecycle.js";
@@ -182,20 +183,51 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<voi
     // Connect to user WebSocket for fill notifications (if position tracking enabled)
     if (positionTracker && client.creds) {
       log("Connecting to user WebSocket for fill tracking...");
+      
+      // Create token mapping for fill conversion
+      const tokenMapping: TokenIdMapping = {
+        yesTokenId: config.market.yesTokenId,
+        noTokenId: config.market.noTokenId,
+      };
+      
       userWs = new UserWebSocket({
         apiKey: client.creds.key,
         apiSecret: client.creds.secret,
         passphrase: client.creds.passphrase,
         onTrade: async (trade) => {
-          // Only process trades for our market's tokens
-          if (
-            trade.asset_id === config.market.yesTokenId ||
-            trade.asset_id === config.market.noTokenId
-          ) {
+          // Filter by market condition ID (not asset_id, since NO trades report YES asset_id)
+          if (trade.market === config.market.conditionId) {
+            // === VERBOSE DEBUG LOGGING ===
+            log(`[DEBUG] Raw trade event:`);
+            log(`  id: ${trade.id}`);
+            log(`  side: ${trade.side}, price: ${trade.price}, size: ${trade.size}`);
+            log(`  outcome: ${trade.outcome}, asset_id: ${trade.asset_id.substring(0, 20)}...`);
+            log(`  owner: ${trade.owner.substring(0, 16)}...`);
+            log(`  trade_owner: ${trade.trade_owner.substring(0, 16)}...`);
+            log(`  taker_order_id: ${trade.taker_order_id.substring(0, 16)}...`);
+            log(`  maker_orders (${trade.maker_orders.length}):`);
+            for (const mo of trade.maker_orders) {
+              log(`    - order_id: ${mo.order_id.substring(0, 16)}...`);
+              log(`      outcome: ${mo.outcome}, price: ${mo.price}, matched: ${mo.matched_amount}`);
+              log(`      owner: ${mo.owner.substring(0, 16)}...`);
+              log(`      asset_id: ${mo.asset_id.substring(0, 20)}...`);
+            }
+            log(`  Our API key: ${client.creds?.key.substring(0, 16)}...`);
+            // === END DEBUG LOGGING ===
+            
             // Capture limit status BEFORE processing fill
             const limitStatusBefore = positionTracker.getLimitStatus();
             
-            const fill = tradeEventToFill(trade);
+            // Pass our API key and order tracker for correct maker/taker attribution
+            const orderTracker = getOrderTracker();
+            const fill = tradeEventToFill(trade, tokenMapping, client.creds?.key ?? "", orderTracker);
+            
+            // Log what we converted the fill to
+            log(`[DEBUG] Converted fill:`);
+            log(`  side: ${fill.side}, price: ${fill.price.toFixed(4)}, size: ${fill.size.toFixed(4)}`);
+            log(`  outcome: ${fill.outcome}, tokenId: ${fill.tokenId.substring(0, 20)}...`);
+            log(`  orderId: ${fill.orderId.substring(0, 16)}...`);
+            
             const isNew = positionTracker.processFill(fill);
             
             if (isNew) {
