@@ -608,4 +608,4 @@ The Safe SDK (`@safe-global/protocol-kit`) handles:
 - All utilities in `src/utils/`
 
 ---
-*Last updated: Fixed tradeEventToFill to use OrderTracker for correct fill side attribution (no longer infers side from taker)*
+*Last updated: 2026-01-16 - Updated market-maker-roadmap.md with implementation phases for P&L tracking, inventory-skewed quoting, and stop-loss*
