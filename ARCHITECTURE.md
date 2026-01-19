@@ -32,9 +32,9 @@ polymarket-trader/
 │   │   └── marketMaker/  # Market maker bot for liquidity rewards
 │   │       ├── index.ts      # Main entry point (thin orchestrator)
 │   │       ├── config.ts     # Strategy configuration (edit this!)
-│   │       ├── types.ts      # Strategy-specific types
+│   │       ├── types.ts      # Strategy-specific types (MergeConfig, WebSocketConfig, etc.)
 │   │       ├── quoter.ts     # Quote generation logic
-│   │       ├── lifecycle.ts  # Startup/shutdown, validation, banner
+│   │       ├── lifecycle.ts  # Startup/shutdown, validation, banner, merge check
 │   │       ├── executor.ts   # Order placement, cancellation, splits
 │   │       └── modes/        # Execution mode implementations
 │   │           ├── index.ts      # Mode exports
@@ -119,11 +119,12 @@ Types for reward eligibility checking and market ranking:
 - `EarningPotentialScore` - Score breakdown based on estimated daily earnings
 - `RankedMarket` - Market with calculated attractiveness score (deprecated)
 - `RankedMarketByEarnings` - Market with calculated earning potential score
+- `ActualEarningsResult` - Result of calculating actual earnings from placed orders
 
 #### `src/types/strategy.ts`
 Shared types for trading strategies:
 - `StrategyConfig` - Base configuration for any strategy
-- `MarketParams` - Market parameters required for trading (yesTokenId, noTokenId, conditionId, tickSize, negRisk, etc.)
+- `MarketParams` - Market parameters required for trading (yesTokenId, noTokenId, conditionId, tickSize, negRisk, rewardsDaily, etc.)
 
 #### `src/types/inventory.ts`
 Types for inventory management and pre-flight checks:
@@ -147,14 +148,18 @@ Types for position tracking:
 - `PositionsSummary` - Summary of all positions across multiple markets
 
 #### `src/types/fills.ts`
-Types for fill tracking and position limits:
-- `Fill` - Trade fill event (id, tokenId, side, price, size, timestamp)
+Types for fill tracking, position limits, and P&L economics:
+- `Fill` - Trade fill event (id, tokenId, side, price, size, timestamp, outcome)
+- `FillEconomics` - Cumulative P&L tracking (totalBought/Sold, totalCost/Proceeds, realizedPnL)
+- `InitialCostBasis` - User-provided cost basis for pre-existing positions
 - `PositionState` - Current position state (yesTokens, noTokens, netExposure)
 - `PositionLimitsConfig` - Position limit settings (maxNetExposure, warnThreshold)
 - `QuoteSideCheck` - Result of checking if a side can be quoted
 - `PositionLimitStatus` - Current status relative to limits
 - `ReconciliationResult` - Result of reconciling persisted vs actual position
-- `PersistedMarketState` - Schema for JSON file storage
+- `PersistedMarketState` - Schema v2 for JSON file storage (fills, economics, initialCostBasis)
+- `createEmptyEconomics()` - Factory function for new FillEconomics
+- `PERSISTED_STATE_VERSION` - Current schema version (2)
 
 #### `src/types/websocket.ts`
 Types for Polymarket WebSocket API (`wss://ws-subscriptions-clob.polymarket.com`):
@@ -215,6 +220,7 @@ Inventory management utilities (uses Safe for CTF operations):
 - `analyzeDeficit(status, requirements)` - Determines if split is needed and how much
 - `runPreFlightChecks(status, requirements, config)` - Validates inventory before starting
 - `ensureSufficientInventory(client, safe, address, ...)` - Splits USDC via Safe if needed
+- `mergeNeutralPosition(safe, conditionId, amount, dryRun)` - Merges YES+NO tokens back to USDC
 - `formatInventoryStatus(status)` - Formats inventory for display
 
 #### `src/utils/client.ts`
@@ -301,6 +307,7 @@ Reward calculation and eligibility checking:
 - `calculateEarningPercentage(yourQMin, totalQMin)` - Calculates earning percentage
 - `estimateDailyEarnings(rewardsDaily, competition, liquidity, spread, maxSpread)` - Estimates daily earnings for a given liquidity
 - `calculateEarningPotential(rewardsDaily, competition, maxSpread, minSize, liquidity)` - Calculates earning potential score for ranking
+- `calculateActualEarnings(client, params)` - Calculates actual earnings from placed orders
 - `getMarketRewardParamsWithMidpoint(client, tokenId)` - Fetches params with midpoint
 - `evaluateOrderReward(order, params)` - Evaluates single order reward status
 - `checkOrdersRewardEligibility(orders, params)` - Checks orders for a token
@@ -325,6 +332,29 @@ Common helper utilities:
 - `formatTimestamp(date?)` - Formats timestamp for logging
 - `createLogger(prefix?)` - Creates a prefixed logger function
 - `log(message)` - Simple timestamped logger
+- `promptForInput(question)` - Prompts user for text input from stdin
+- `promptForNumber(question, min, max)` - Prompts for validated numeric input
+
+- `formatDuration(ms)` - Formats duration in milliseconds to human-readable (e.g., "2h 30m 15s")
+
+#### `src/utils/marketDiscovery.ts`
+Market discovery utilities for finding and ranking markets by earning potential:
+- `discoverMarkets(options?)` - Main discovery function, fetches and ranks markets
+- `findBestMarket(liquidity, options?)` - Convenience function to get single best market
+- `rankMarketsByEarnings(markets, liquidity)` - Ranks markets by estimated daily earnings
+- `fetchRealCompetition(markets, options?)` - Fetches real Q scores from orderbooks
+- `getFirstTokenId(market)` - Extracts first token ID from clobTokenIds field
+
+**Used by:** `findBestMarkets.ts` script and orchestrator
+
+#### `src/utils/marketConfigGenerator.ts`
+Utility to generate MarketParams from discovered markets:
+- `generateMarketConfig(market, options?)` - Creates MarketParams from RankedMarketByEarnings
+- `parseClobTokenIds(clobTokenIds)` - Parses token IDs from JSON array or comma-separated string
+- `validateMarketParams(params)` - Validates all required fields
+- `formatMarketConfig(params, question?)` - Human-readable config summary
+
+**Used by:** Orchestrator to create market maker configs programmatically
 
 #### `src/utils/websocket.ts`
 Polymarket WebSocket manager for real-time market data:
@@ -357,7 +387,9 @@ Authenticated WebSocket manager for user-specific events:
   - `connect()` - Connects and authenticates
   - `disconnect()` - Disconnects and cleans up
   - `isConnected()` - Returns connection status
-- `tradeEventToFill(trade)` - Converts WebSocket trade event to Fill type
+- `TokenIdMapping` - Interface for YES/NO token ID mapping
+- `tradeEventToFill(trade, tokenMapping, ourApiKey, orderLookup?)` - Converts WebSocket trade event to Fill type
+- `OrderLookup` - Interface for looking up tracked order info (decouples from OrderTracker)
 
 **WebSocket Endpoint:** `wss://ws-subscriptions-clob.polymarket.com/ws/user`
 
@@ -367,26 +399,85 @@ Authenticated WebSocket manager for user-specific events:
 - Auto-reconnect with exponential backoff
 - Ping/pong keep-alive
 
+**CRITICAL: Fill Attribution Logic:**
+The Polymarket CLOB only maintains order books for YES tokens. NO token orders are internally converted:
+- `BUY NO @ $0.58` → internally becomes `SELL YES @ $0.42` on the orderbook
+
+When WebSocket trade events arrive, we use the `maker_orders` array AND the `OrderTracker` to correctly attribute fills:
+
+1. **Check `maker_orders` first**: Each maker order has `owner` (API key), `outcome`, `price`, `matched_amount`
+2. **If we're the maker** (our API key matches an entry in `maker_orders`):
+   - Use that maker order's `outcome` to determine YES/NO token
+   - **Use `OrderTracker` to get the original order side** - this is what WE placed (BUY or SELL)
+   - Use the maker order's `price` and `matched_amount` for accurate fill details
+   - Fallback: If order not found in tracker, infer side from taker (may be incorrect for old orders)
+3. **If we're the taker** (our API key is NOT in `maker_orders`):
+   - Use trade-level fields (`outcome`, `side`, `price`, `size`) directly (taker's perspective)
+
+**Why OrderTracker is needed:** The taker's side has no relation to what we placed. If we placed
+a `BUY YES` order, when it's filled we bought YES tokens, regardless of whether the taker was
+buying or selling. The `OrderTracker` stores the original side when we place orders, ensuring
+correct attribution.
+
+#### `src/utils/orderTracker.ts`
+Order ID tracking for correct fill attribution:
+- `OrderTracker` - Class to track placed orders
+  - `trackOrder(orderId, info)` - Records order details when placed
+  - `getOrder(orderId)` - Retrieves order info by ID
+  - `removeOrder(orderId)` - Removes order from tracking
+  - `removeOrdersForToken(tokenId)` - Clears orders for a token
+  - `clear()` - Clears all tracked orders
+- `TrackedOrder` - Interface for tracked order info (tokenId, tokenType, side, price, size, placedAt)
+- `getOrderTracker()` - Gets global tracker instance
+- `resetOrderTracker()` - Resets global tracker (for testing)
+
+**Purpose:** When placing orders, we track which token (YES/NO) and side (BUY/SELL) each order was placed for.
+This is **essential** for correct fill attribution - we use the tracked `side` to know what we actually
+did (bought or sold), rather than incorrectly inferring from the taker's perspective.
+
 #### `src/utils/storage.ts`
 JSON file persistence for position tracking data:
-- `loadMarketState(conditionId)` - Loads persisted state from disk
+- `loadMarketState(conditionId)` - Loads persisted state from disk (handles v1→v2 migration)
 - `saveMarketState(state)` - Saves state to disk
-- `createEmptyState(conditionId, yesTokenId, noTokenId)` - Creates new state
+- `createEmptyState(conditionId, yesTokenId, noTokenId)` - Creates new state with initialized economics
 - `appendFill(conditionId, yesTokenId, noTokenId, fill)` - Appends a fill
 - `setInitialPosition(conditionId, yesTokenId, noTokenId, yes, no)` - Sets initial position
+- `rebuildEconomicsFromFills(fills, yesTokenId)` - Rebuilds FillEconomics from fill history
+- `saveEconomics(conditionId, yesTokenId, noTokenId, economics)` - Updates economics in state
 
 **Storage Location:** `./data/fills-{conditionId}.json`
 
+**Schema Version:** 2 (auto-migrates from v1 by rebuilding economics)
+
+**Schema Migration Requirements:**
+When modifying `PersistedMarketState`:
+1. Increment `PERSISTED_STATE_VERSION` in `src/types/fills.ts`
+2. Add migration logic in `loadMarketState()` in `src/utils/storage.ts`
+3. Test with existing data files before deploying
+4. Document version changes in storage.ts header comment
+
 #### `src/utils/positionTracker.ts`
-Position tracking for market making strategies:
-- `PositionTracker` - Class for tracking YES/NO positions and enforcing limits
-  - `initialize(yesBalance, noBalance)` - Initialize from current balances
-  - `processFill(fill)` - Process a fill and update position
+Position tracking for market making strategies with P&L economics:
+- `PositionTracker` - Class for tracking YES/NO positions, limits, and P&L
+  - `initialize(yesBalance, noBalance)` - Initialize from current balances, returns `needsCostBasis` flag
+  - `processFill(fill)` - Process a fill, update position and economics
+  - `processMerge(mergedAmount)` - Process a merge, adjust position and economics proportionally
   - `canQuoteBuy()` - Check if BUY side is allowed
   - `canQuoteSell()` - Check if SELL side is allowed
-  - `getPositionState()` - Get current position state
+  - `getPositionState()` - Get current position state (includes `neutralPosition`)
+  - `getNetExposure()` - Get net exposure (yesTokens - noTokens)
   - `getLimitStatus()` - Get limit utilization status
   - `formatStatus()` - Format position for display
+  - **P&L Methods:**
+  - `getAverageCost(tokenType)` - Get weighted average cost per token type
+  - `getUnrealizedPnL(midpoint)` - Mark-to-market P&L
+  - `getRealizedPnL()` - Accumulated realized P&L from sells
+  - `getTotalPnL(midpoint)` - Unrealized + realized P&L
+  - `getEconomics()` - Get raw FillEconomics data
+  - `formatPnLStatus(midpoint)` - Detailed P&L display (on fills)
+  - `formatPnLCompact(midpoint)` - Compact P&L display (on rebalance)
+  - `setInitialCostBasis(yesCost, noCost)` - Set cost basis for pre-existing tokens
+  - `needsInitialCostBasis()` - Check if cost basis input is needed
 - `createPositionTracker(conditionId, yesTokenId, noTokenId, maxNetExposure)` - Factory function
 
 **Position Limits:**
@@ -394,6 +485,17 @@ Position tracking for market making strategies:
 - Positive = long YES, Negative = long NO
 - Blocks BUY when exposure >= maxNetExposure
 - Blocks SELL when exposure <= -maxNetExposure
+
+**Neutral Position (Mergeable):**
+- Neutral position = min(yesTokens, noTokens)
+- Represents market-neutral tokens that can be merged back to USDC
+- Auto-merge frees locked capital for continued trading
+
+**P&L Calculation:**
+- Uses weighted average cost basis
+- Unrealized P&L: `position × (currentPrice - avgCost)`
+- Realized P&L: Accumulated when selling at `(salePrice - avgCost) × size`
+- **On merge:** Economics adjusted proportionally (cost basis reduced by merged ratio)
 
 ### `src/scripts/`
 Directory for executable utility scripts. Each script should:
@@ -446,11 +548,78 @@ Finds the highest-earning markets for liquidity rewards:
 - Supports `--json`, `--details`, `--limit`, `--max-size`, `--liquidity` options
 - Usage: `npm run findBestMarkets` or `npm run findBestMarkets -- --liquidity 500`
 
+#### `src/scripts/orchestrate.ts`
+Entry point for the market maker orchestrator:
+- Thin wrapper that calls `main()` from `@/strategies/orchestrator/index.ts`
+- Parses CLI arguments for configuration
+- Usage: `npm run orchestrate` (see orchestrator section for full options)
+
 ### `src/strategies/`
 Directory for automated trading strategies. Each strategy should:
 - Have its own subdirectory with `index.ts`, `config.ts`, `types.ts`
 - Use shared utilities from `@/utils/*`
 - Have configurable parameters in `config.ts`
+
+#### `src/strategies/orchestrator/`
+Automatic market selection and switching orchestrator.
+
+**Purpose:** Automatically maximizes liquidity rewards by:
+1. Finding the best market based on earning potential
+2. Running the market maker continuously
+3. Periodically re-evaluating markets (every N minutes)
+4. When a better market is found, setting a "pending switch"
+5. When position becomes neutral AND pending switch exists, executing the switch
+
+**Files:**
+- `index.ts` - Main orchestrator loop and CLI entry point
+- `config.ts` - Orchestrator configuration (`OrchestratorConfig`, defaults, CLI parsing)
+- `types.ts` - Orchestrator types (`OrchestratorState`, `PendingSwitch`, `SwitchDecision`, events)
+
+**Key Features:**
+- Uses `findBestMarket()` from `@/utils/marketDiscovery.ts`
+- Uses `generateMarketConfig()` from `@/utils/marketConfigGenerator.ts`
+- **Actual earnings comparison**: Uses `calculateActualEarnings()` to compare real performance vs estimated potential
+- **Periodic re-evaluation** with configurable interval (default 5 minutes)
+- **Pending switch pattern**: Better market sets flag, switch executes when neutral
+- Configurable switching threshold (default 20% improvement required)
+- Log-only mode for safe testing (default: no real switching)
+- Session summary with cumulative stats on shutdown
+
+**Switching Logic:**
+- Uses **actual earnings** from placed orders when available (not just estimates)
+- Falls back to estimated earnings if no orders are placed
+- Compares actual current vs estimated candidate (conservative approach)
+- Neutral position ENABLES switching but doesn't TRIGGER it
+- Finding a better market TRIGGERS the pending switch flag
+- Switch executes only when BOTH: pending switch exists AND position is neutral
+
+**Usage:**
+```bash
+npm run orchestrate                          # Dry run, log switching decisions
+npm run orchestrate -- --liquidity 200       # Custom liquidity amount
+npm run orchestrate -- --threshold 0.15      # 15% improvement threshold
+npm run orchestrate -- --re-evaluate-interval 10  # Check every 10 minutes
+npm run orchestrate -- --enable-switching    # Enable market switching (still dry run)
+npm run orchestrate -- --enable-switching --no-dry-run  # Full live mode
+```
+
+**Flow Diagram:**
+```
+STARTUP → find best market → MARKET_MAKING
+                                   │
+              ┌────────────────────┴────────────────────┐
+              │                                         │
+        [periodic timer]                           [fills occur]
+              │                                         │
+        re-evaluate markets                    check onCheckPendingSwitch
+              │                                         │
+        if better market:                     if pendingSwitch && neutral:
+        set pendingSwitch                            SWITCH
+              │                                         │
+              └────────────────────┬────────────────────┘
+                                   │
+                              MARKET_MAKING (or new market)
+```
 
 #### `src/strategies/marketMaker/`
 Market maker bot for earning Polymarket liquidity rewards.
@@ -460,11 +629,56 @@ Market maker bot for earning Polymarket liquidity rewards.
 **Files:**
 - `index.ts` - Main entry point (thin orchestrator)
 - `config.ts` - Strategy configuration (edit this to set your market!)
-- `types.ts` - Strategy-specific types
+- `types.ts` - Strategy-specific types (`MergeConfig`, `WebSocketConfig`, `PositionLimitsConfig`, `SessionStats`)
 - `quoter.ts` - Quote generation logic
-- `lifecycle.ts` - Startup/shutdown handlers, config validation, banner printing
+- `lifecycle.ts` - Startup/shutdown handlers, config validation, banner printing, merge check, session summary
 - `executor.ts` - Order placement and cancellation
 - `modes/` - Execution mode implementations (WebSocket and polling)
+
+**Auto-Merge Feature:**
+When the bot accumulates both YES and NO tokens (neutral position), it automatically
+merges them back to USDC before placing new orders. This frees up locked capital
+for continued trading.
+
+Configuration in `config.ts`:
+```typescript
+merge: {
+  enabled: true,        // Enable automatic merging
+  minMergeAmount: 0,    // Merge any neutral position (0 = any amount)
+}
+```
+
+Merge lifecycle:
+1. At start of each rebalance cycle, check if `neutralPosition > minMergeAmount`
+2. If yes, execute merge via Safe (CTF `mergePositions`)
+3. Update PositionTracker economics (proportional cost reduction)
+4. Continue with normal quote placement
+
+**Session Statistics:**
+The bot tracks session statistics and displays a summary on shutdown:
+- Duration, cycle count, fills, volume traded
+- Orders placed and cancelled
+- Merge operations performed and USDC freed
+
+Example shutdown summary:
+```
+============================================================
+  SESSION SUMMARY
+============================================================
+  Duration: 2h 15m 30s
+  Cycles: 450
+------------------------------------------------------------
+  TRADING:
+    Fills: 24
+    Volume: $1,234.56
+    Orders Placed: 892
+    Orders Cancelled: 888
+------------------------------------------------------------
+  MERGE OPERATIONS:
+    Merges: 8
+    USDC Freed: $456.78
+============================================================
+```
 
 ## Environment Variables
 
@@ -493,6 +707,8 @@ npm run findBestMarkets -- --details 1                # Show details for top mar
 
 # Trading strategies
 npm run marketMaker                                   # Run market maker bot (configure first!)
+npm run orchestrate                                   # Run orchestrator (auto market selection)
+npm run orchestrate -- --help                         # Show orchestrator options
 ```
 
 ## APIs Used
@@ -570,4 +786,4 @@ The Safe SDK (`@safe-global/protocol-kit`) handles:
 - All utilities in `src/utils/`
 
 ---
-*Last updated: Added real orderbook competition calculation to findBestMarkets (fixes inaccurate API market_competitiveness)*
+*Last updated: 2026-01-19 - Added actual earnings calculation for orchestrator switching decisions*

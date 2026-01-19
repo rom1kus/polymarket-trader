@@ -36,24 +36,29 @@
 
 import type {
   Fill,
+  FillEconomics,
+  InitialCostBasis,
   PositionState,
   PositionLimitsConfig,
   QuoteSideCheck,
   PositionLimitStatus,
   ReconciliationResult,
 } from "@/types/fills.js";
+import { createEmptyEconomics } from "@/types/fills.js";
 import {
   loadMarketState,
   saveMarketState,
   appendFill,
   setInitialPosition,
+  rebuildEconomicsFromFills,
 } from "@/utils/storage.js";
 import { log } from "@/utils/helpers.js";
 
 /**
  * Position tracker for a single binary market.
  *
- * Manages position state, enforces limits, and persists fill history.
+ * Manages position state, enforces limits, tracks P&L economics,
+ * and persists fill history.
  */
 export class PositionTracker {
   private conditionId: string;
@@ -64,6 +69,12 @@ export class PositionTracker {
   // Current position state
   private yesTokens: number = 0;
   private noTokens: number = 0;
+
+  // P&L economics tracking
+  private economics: FillEconomics = createEmptyEconomics();
+
+  // User-provided cost basis for pre-existing positions
+  private initialCostBasis: InitialCostBasis | null = null;
 
   // Track fills received this session (for deduplication)
   private processedFillIds: Set<string> = new Set();
@@ -94,7 +105,7 @@ export class PositionTracker {
    * @param noBalance - Current NO token balance from API
    * @returns Reconciliation result showing any discrepancies
    */
-  initialize(yesBalance: number, noBalance: number): ReconciliationResult {
+  initialize(yesBalance: number, noBalance: number): ReconciliationResult & { needsCostBasis?: boolean } {
     // Load persisted state
     const persisted = loadMarketState(this.conditionId);
 
@@ -103,6 +114,7 @@ export class PositionTracker {
       // Use actual balance as starting point
       this.yesTokens = yesBalance;
       this.noTokens = noBalance;
+      this.economics = createEmptyEconomics();
 
       // Create new persisted state with initial position
       setInitialPosition(
@@ -115,7 +127,13 @@ export class PositionTracker {
 
       this.initialized = true;
 
-      log(`[PositionTracker] Initialized fresh - YES: ${yesBalance}, NO: ${noBalance}`);
+      // If starting with existing tokens, flag that we need cost basis
+      const needsCostBasis = yesBalance > 0.001 || noBalance > 0.001;
+
+      log(`[PositionTracker] Initialized fresh - YES: ${yesBalance.toFixed(2)}, NO: ${noBalance.toFixed(2)}`);
+      if (needsCostBasis) {
+        log(`[PositionTracker] Note: Starting with pre-existing tokens. Cost basis needed for P&L tracking.`);
+      }
 
       const position = this.getPositionState();
       return {
@@ -123,8 +141,15 @@ export class PositionTracker {
         expectedPosition: position,
         actualPosition: position,
         discrepancy: { yesTokens: 0, noTokens: 0 },
+        needsCostBasis,
       };
     }
+
+    // Load economics (will be present in v2, rebuilt during migration from v1)
+    this.economics = persisted.economics ?? rebuildEconomicsFromFills(persisted.fills, this.yesTokenId);
+
+    // Load initial cost basis if present
+    this.initialCostBasis = persisted.initialCostBasis ?? null;
 
     // We have persisted data - calculate expected position from fills
     let expectedYes = persisted.initialPosition?.yesTokens ?? 0;
@@ -206,6 +231,15 @@ export class PositionTracker {
       );
     }
 
+    // Check if we need cost basis for initial position
+    const initialHasTokens = (persisted.initialPosition?.yesTokens ?? 0) > 0.001 ||
+                             (persisted.initialPosition?.noTokens ?? 0) > 0.001;
+    const needsCostBasis = initialHasTokens && !this.initialCostBasis;
+
+    if (needsCostBasis) {
+      log(`[PositionTracker] Note: Initial position has tokens without cost basis. P&L may be inaccurate.`);
+    }
+
     return {
       success: true,
       expectedPosition,
@@ -217,13 +251,14 @@ export class PositionTracker {
       warning: hasDiscrepancy
         ? `Position discrepancy: YES=${yesDiscrepancy.toFixed(2)}, NO=${noDiscrepancy.toFixed(2)}`
         : undefined,
+      needsCostBasis,
     };
   }
 
   /**
    * Processes a new fill from WebSocket.
    *
-   * Updates the position and persists the fill to disk.
+   * Updates the position, economics, and persists the fill to disk.
    * Handles deduplication (same fill ID won't be processed twice).
    *
    * @param fill - Fill to process
@@ -249,36 +284,79 @@ export class PositionTracker {
     // Track as processed
     this.processedFillIds.add(fill.id);
 
-    // Update position
-    if (fill.tokenId === this.yesTokenId) {
-      if (fill.side === "BUY") {
-        this.yesTokens += fill.size;
-      } else {
-        this.yesTokens -= fill.size;
-      }
-    } else if (fill.tokenId === this.noTokenId) {
-      if (fill.side === "BUY") {
-        this.noTokens += fill.size;
-      } else {
-        this.noTokens -= fill.size;
-      }
-    } else {
+    // Determine token type
+    const isYes = fill.tokenId === this.yesTokenId;
+    const isNo = fill.tokenId === this.noTokenId;
+
+    if (!isYes && !isNo) {
       // Fill for unknown token - shouldn't happen but log it
       log(`[PositionTracker] Fill for unknown token: ${fill.tokenId}`);
       return false;
     }
 
-    // Persist fill
+    const cost = fill.price * fill.size;
+
+    // Update position and economics
+    if (isYes) {
+      if (fill.side === "BUY") {
+        this.yesTokens += fill.size;
+        this.economics.totalYesBought += fill.size;
+        this.economics.totalYesCost += cost;
+      } else {
+        this.yesTokens -= fill.size;
+        this.economics.totalYesSold += fill.size;
+        this.economics.totalYesProceeds += cost;
+
+        // Calculate realized P&L for this sell (using weighted average cost)
+        if (this.economics.totalYesBought > 0) {
+          const avgCost = this.economics.totalYesCost / this.economics.totalYesBought;
+          const realizedFromSale = (fill.price - avgCost) * fill.size;
+          this.economics.realizedPnL += realizedFromSale;
+        }
+      }
+    } else {
+      // NO token
+      if (fill.side === "BUY") {
+        this.noTokens += fill.size;
+        this.economics.totalNoBought += fill.size;
+        this.economics.totalNoCost += cost;
+      } else {
+        this.noTokens -= fill.size;
+        this.economics.totalNoSold += fill.size;
+        this.economics.totalNoProceeds += cost;
+
+        // Calculate realized P&L for this sell (using weighted average cost)
+        if (this.economics.totalNoBought > 0) {
+          const avgCost = this.economics.totalNoCost / this.economics.totalNoBought;
+          const realizedFromSale = (fill.price - avgCost) * fill.size;
+          this.economics.realizedPnL += realizedFromSale;
+        }
+      }
+    }
+
+    // Persist fill and economics
     appendFill(this.conditionId, this.yesTokenId, this.noTokenId, fill);
+    this.saveEconomics();
 
     // Log the fill
-    const tokenType = fill.tokenId === this.yesTokenId ? "YES" : "NO";
+    const tokenType = isYes ? "YES" : "NO";
     log(
-      `[PositionTracker] Fill: ${fill.side} ${fill.size.toFixed(2)} ${tokenType} @ ${fill.price.toFixed(4)} ` +
+      `[PositionTracker] Fill: ${fill.side} ${fill.size.toFixed(2)} ${tokenType} @ $${fill.price.toFixed(4)} ` +
       `| Net exposure: ${this.getNetExposure().toFixed(2)}`
     );
 
     return true;
+  }
+
+  /**
+   * Saves current economics to persisted state.
+   */
+  private saveEconomics(): void {
+    const state = loadMarketState(this.conditionId);
+    if (state) {
+      state.economics = this.economics;
+      saveMarketState(state);
+    }
   }
 
   /**
@@ -299,6 +377,191 @@ export class PositionTracker {
    */
   getNetExposure(): number {
     return this.yesTokens - this.noTokens;
+  }
+
+  // =============================================================================
+  // P&L Methods
+  // =============================================================================
+
+  /**
+   * Gets the average cost for a token type.
+   *
+   * Returns null if no tokens of that type have been bought yet.
+   * Note: Does not account for initial position cost basis (if not provided).
+   *
+   * @param tokenType - "YES" or "NO"
+   * @returns Average cost per token (0-1), or null if no buys
+   */
+  getAverageCost(tokenType: "YES" | "NO"): number | null {
+    if (tokenType === "YES") {
+      // Include initial cost basis if available
+      const initialYes = this.getInitialPositionTokens("YES");
+      const initialCost = this.initialCostBasis?.yesAvgCost ?? null;
+
+      const totalBought = this.economics.totalYesBought + (initialCost !== null ? initialYes : 0);
+      const totalCost = this.economics.totalYesCost + (initialCost !== null ? initialYes * initialCost : 0);
+
+      if (totalBought <= 0) return null;
+      return totalCost / totalBought;
+    } else {
+      const initialNo = this.getInitialPositionTokens("NO");
+      const initialCost = this.initialCostBasis?.noAvgCost ?? null;
+
+      const totalBought = this.economics.totalNoBought + (initialCost !== null ? initialNo : 0);
+      const totalCost = this.economics.totalNoCost + (initialCost !== null ? initialNo * initialCost : 0);
+
+      if (totalBought <= 0) return null;
+      return totalCost / totalBought;
+    }
+  }
+
+  /**
+   * Gets the initial position tokens for a token type.
+   * Helper for cost basis calculations.
+   */
+  private getInitialPositionTokens(tokenType: "YES" | "NO"): number {
+    const state = loadMarketState(this.conditionId);
+    if (!state?.initialPosition) return 0;
+    return tokenType === "YES" ? state.initialPosition.yesTokens : state.initialPosition.noTokens;
+  }
+
+  /**
+   * Gets the unrealized P&L (mark-to-market) for current position.
+   *
+   * Calculates the paper profit/loss if you were to close the position at the current midpoint.
+   *
+   * @param currentMidpoint - Current market midpoint (YES price, 0-1)
+   * @returns Unrealized P&L in dollars
+   */
+  getUnrealizedPnL(currentMidpoint: number): number {
+    const avgYesCost = this.getAverageCost("YES");
+    const avgNoCost = this.getAverageCost("NO");
+
+    // YES tokens: current value - cost basis
+    // If we hold YES tokens, their value is midpoint * quantity
+    // Our cost was avgYesCost * quantity
+    // Profit = (midpoint - avgYesCost) * quantity
+    let yesUnrealized = 0;
+    if (this.yesTokens > 0 && avgYesCost !== null) {
+      yesUnrealized = this.yesTokens * (currentMidpoint - avgYesCost);
+    }
+
+    // NO tokens: current value is (1 - midpoint) * quantity
+    // Our cost was avgNoCost * quantity
+    // Profit = ((1 - midpoint) - avgNoCost) * quantity
+    let noUnrealized = 0;
+    if (this.noTokens > 0 && avgNoCost !== null) {
+      noUnrealized = this.noTokens * ((1 - currentMidpoint) - avgNoCost);
+    }
+
+    return yesUnrealized + noUnrealized;
+  }
+
+  /**
+   * Gets the realized P&L from completed round-trips.
+   *
+   * @returns Realized P&L in dollars
+   */
+  getRealizedPnL(): number {
+    return this.economics.realizedPnL;
+  }
+
+  /**
+   * Gets the total P&L (realized + unrealized).
+   *
+   * @param currentMidpoint - Current market midpoint (YES price, 0-1)
+   * @returns Total P&L in dollars
+   */
+  getTotalPnL(currentMidpoint: number): number {
+    return this.getRealizedPnL() + this.getUnrealizedPnL(currentMidpoint);
+  }
+
+  /**
+   * Gets the raw economics data.
+   * Useful for debugging or detailed display.
+   */
+  getEconomics(): FillEconomics {
+    return { ...this.economics };
+  }
+
+  /**
+   * Formats P&L status for display.
+   *
+   * @param currentMidpoint - Current market midpoint (YES price, 0-1)
+   * @returns Formatted P&L string
+   */
+  formatPnLStatus(currentMidpoint: number): string {
+    const avgYesCost = this.getAverageCost("YES");
+    const avgNoCost = this.getAverageCost("NO");
+    const unrealized = this.getUnrealizedPnL(currentMidpoint);
+    const realized = this.getRealizedPnL();
+    const total = unrealized + realized;
+
+    const formatCost = (cost: number | null) => cost !== null ? `$${cost.toFixed(4)}` : "N/A";
+    const formatPnL = (pnl: number) => {
+      const sign = pnl >= 0 ? "+" : "";
+      return `${sign}$${pnl.toFixed(2)}`;
+    };
+
+    return (
+      `  Avg Cost: YES=${formatCost(avgYesCost)}, NO=${formatCost(avgNoCost)}\n` +
+      `  P&L: Unrealized=${formatPnL(unrealized)}, Realized=${formatPnL(realized)}, Total=${formatPnL(total)}`
+    );
+  }
+
+  /**
+   * Formats a compact P&L summary for periodic logging.
+   *
+   * @param currentMidpoint - Current market midpoint (YES price, 0-1)
+   * @returns Compact P&L string
+   */
+  formatPnLCompact(currentMidpoint: number): string {
+    const unrealized = this.getUnrealizedPnL(currentMidpoint);
+    const realized = this.getRealizedPnL();
+    const formatPnL = (pnl: number) => {
+      const sign = pnl >= 0 ? "+" : "";
+      return `${sign}$${pnl.toFixed(2)}`;
+    };
+    return `P&L: ${formatPnL(unrealized)} unreal, ${formatPnL(realized)} real`;
+  }
+
+  /**
+   * Sets the initial cost basis for pre-existing positions.
+   *
+   * Call this when starting with tokens that weren't acquired through tracked fills.
+   *
+   * @param yesAvgCost - Average cost per YES token (0-1), or null if none held
+   * @param noAvgCost - Average cost per NO token (0-1), or null if none held
+   */
+  setInitialCostBasis(yesAvgCost: number | null, noAvgCost: number | null): void {
+    this.initialCostBasis = {
+      yesAvgCost,
+      noAvgCost,
+      timestamp: Date.now(),
+    };
+
+    // Persist to state
+    const state = loadMarketState(this.conditionId);
+    if (state) {
+      state.initialCostBasis = this.initialCostBasis;
+      saveMarketState(state);
+    }
+
+    log(
+      `[PositionTracker] Initial cost basis set:\n` +
+      `  YES: ${yesAvgCost !== null ? `$${yesAvgCost.toFixed(4)}` : "N/A"}\n` +
+      `  NO:  ${noAvgCost !== null ? `$${noAvgCost.toFixed(4)}` : "N/A"}`
+    );
+  }
+
+  /**
+   * Checks if initial cost basis is needed for accurate P&L tracking.
+   */
+  needsInitialCostBasis(): boolean {
+    const initialYes = this.getInitialPositionTokens("YES");
+    const initialNo = this.getInitialPositionTokens("NO");
+    const hasInitialPosition = initialYes > 0.001 || initialNo > 0.001;
+    return hasInitialPosition && this.initialCostBasis === null;
   }
 
   /**
@@ -428,6 +691,85 @@ export class PositionTracker {
       this.noTokenId,
       yesTokens,
       noTokens
+    );
+  }
+
+  /**
+   * Processes a merge operation, adjusting position and economics.
+   *
+   * Merge converts equal amounts of YES + NO tokens back to USDC.
+   * This adjusts the cost basis proportionally:
+   * - Reduces totalYesBought/totalNoBought by mergedAmount
+   * - Reduces totalYesCost/totalNoCost proportionally
+   *
+   * The merged tokens have zero economic impact on P&L since
+   * YES + NO = $1 USDC (the original capital is returned).
+   *
+   * @param mergedAmount - Amount of tokens merged (applies to both YES and NO)
+   */
+  processMerge(mergedAmount: number): void {
+    if (mergedAmount <= 0) {
+      return;
+    }
+
+    const oldState = this.getPositionState();
+
+    // Validate we have enough tokens to merge
+    if (mergedAmount > oldState.neutralPosition) {
+      log(`[PositionTracker] Warning: Merge amount ${mergedAmount} exceeds neutral position ${oldState.neutralPosition}`);
+      return;
+    }
+
+    // Adjust token balances
+    this.yesTokens -= mergedAmount;
+    this.noTokens -= mergedAmount;
+
+    // Adjust economics proportionally
+    // For YES tokens: reduce totalBought and totalCost proportionally
+    if (this.economics.totalYesBought > 0) {
+      const yesReductionRatio = Math.min(1, mergedAmount / this.economics.totalYesBought);
+      const yesCostReduction = this.economics.totalYesCost * yesReductionRatio;
+      
+      this.economics.totalYesBought -= mergedAmount;
+      this.economics.totalYesCost -= yesCostReduction;
+      
+      // Ensure non-negative values
+      this.economics.totalYesBought = Math.max(0, this.economics.totalYesBought);
+      this.economics.totalYesCost = Math.max(0, this.economics.totalYesCost);
+    }
+
+    // For NO tokens: reduce totalBought and totalCost proportionally
+    if (this.economics.totalNoBought > 0) {
+      const noReductionRatio = Math.min(1, mergedAmount / this.economics.totalNoBought);
+      const noCostReduction = this.economics.totalNoCost * noReductionRatio;
+      
+      this.economics.totalNoBought -= mergedAmount;
+      this.economics.totalNoCost -= noCostReduction;
+      
+      // Ensure non-negative values
+      this.economics.totalNoBought = Math.max(0, this.economics.totalNoBought);
+      this.economics.totalNoCost = Math.max(0, this.economics.totalNoCost);
+    }
+
+    // Persist the updated state
+    this.saveEconomics();
+    
+    // Update initial position to reflect new balances
+    setInitialPosition(
+      this.conditionId,
+      this.yesTokenId,
+      this.noTokenId,
+      this.yesTokens,
+      this.noTokens
+    );
+
+    const newState = this.getPositionState();
+
+    log(
+      `[PositionTracker] Merge processed: ${mergedAmount.toFixed(2)} tokens\n` +
+      `  Before: YES=${oldState.yesTokens.toFixed(2)}, NO=${oldState.noTokens.toFixed(2)}, Neutral=${oldState.neutralPosition.toFixed(2)}\n` +
+      `  After:  YES=${newState.yesTokens.toFixed(2)}, NO=${newState.noTokens.toFixed(2)}, Neutral=${newState.neutralPosition.toFixed(2)}\n` +
+      `  USDC freed: $${mergedAmount.toFixed(2)}`
     );
   }
 }

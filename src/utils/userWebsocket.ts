@@ -351,38 +351,113 @@ export class UserWebSocket {
 }
 
 /**
+ * Token ID mapping for converting outcome to actual token.
+ */
+export interface TokenIdMapping {
+  yesTokenId: string;
+  noTokenId: string;
+}
+
+/**
+ * Interface for looking up tracked order information.
+ * Allows passing the OrderTracker without creating a direct dependency.
+ */
+export interface OrderLookup {
+  getOrder(orderId: string): { side: "BUY" | "SELL"; tokenType: "YES" | "NO" } | undefined;
+}
+
+/**
  * Converts a UserTradeEvent from WebSocket to our Fill type.
  *
- * IMPORTANT: The WebSocket trade event's `side` field represents the TAKER's side.
- * When you're the maker (your resting order gets filled), you need to invert the side
- * to get YOUR perspective on the trade.
+ * CRITICAL: The Polymarket CLOB only has order books for YES tokens.
+ * - BUY YES orders sit on the YES bid
+ * - BUY NO orders are internally converted to SELL YES orders on the YES ask
  *
- * - If trade_owner === owner: You're the taker, use side as-is
- * - If trade_owner !== owner: You're the maker, invert the side
+ * When a trade event arrives, we need to determine:
+ * 1. Were we the maker or taker?
+ * 2. What outcome/token did WE actually trade?
+ * 
+ * The `maker_orders` array contains details for each maker order in the trade.
+ * If we're the maker, our API key will match one of the `owner` fields in `maker_orders`.
+ * 
+ * IMPORTANT: We use the OrderTracker to get the ORIGINAL side of our order.
+ * The taker's side is irrelevant to what WE placed. If we placed a BUY YES order,
+ * when it's filled we BOUGHT YES tokens, regardless of the taker's perspective.
+ *
+ * If we're the taker, we use the trade-level fields (side, price, outcome).
  *
  * @param trade - Trade event from WebSocket
+ * @param tokenMapping - Mapping of outcome names to token IDs
+ * @param ourApiKey - Our API key to identify if we're a maker
+ * @param orderLookup - Optional order tracker to look up original order side
  * @returns Fill object for storage/tracking
  */
-export function tradeEventToFill(trade: UserTradeEvent): import("@/types/fills.js").Fill {
-  // Determine if we're the maker or taker
-  // trade_owner is the taker's API key, owner is the event recipient (us)
-  const isMaker = trade.trade_owner !== trade.owner;
-
-  // The side in the event is the TAKER's side
-  // If we're the maker, our side is the opposite
-  const ourSide: "BUY" | "SELL" = isMaker
-    ? (trade.side === "BUY" ? "SELL" : "BUY")
-    : trade.side;
-
+export function tradeEventToFill(
+  trade: UserTradeEvent,
+  tokenMapping: TokenIdMapping,
+  ourApiKey: string,
+  orderLookup?: OrderLookup
+): import("@/types/fills.js").Fill {
+  // First, check if we're a maker in this trade by finding our order in maker_orders
+  const ourMakerOrder = trade.maker_orders.find(mo => mo.owner === ourApiKey);
+  
+  if (ourMakerOrder) {
+    // We're the MAKER - use maker order details for correct attribution
+    const isYesOutcome = ourMakerOrder.outcome.toLowerCase() === "yes";
+    const tokenId = isYesOutcome ? tokenMapping.yesTokenId : tokenMapping.noTokenId;
+    
+    // Use the maker order's price and matched amount
+    const price = parseFloat(ourMakerOrder.price);
+    const size = parseFloat(ourMakerOrder.matched_amount);
+    
+    // CRITICAL: Look up the original order side from OrderTracker
+    // This is the side WE placed, not inferred from the taker's side
+    const trackedOrder = orderLookup?.getOrder(ourMakerOrder.order_id);
+    
+    let ourSide: "BUY" | "SELL";
+    if (trackedOrder) {
+      // Use the tracked order's side - this is what WE placed
+      ourSide = trackedOrder.side;
+    } else {
+      // Fallback: infer from taker's side (legacy behavior, may be incorrect)
+      // This happens if the order wasn't tracked (e.g., placed before bot started)
+      ourSide = trade.side === "BUY" ? "SELL" : "BUY";
+      // Log warning since this fallback may be incorrect
+      console.warn(
+        `[tradeEventToFill] Order ${ourMakerOrder.order_id.substring(0, 16)}... not found in tracker, ` +
+        `using fallback side inference (may be incorrect)`
+      );
+    }
+    
+    return {
+      id: trade.id,
+      tokenId,
+      conditionId: trade.market,
+      side: ourSide,
+      price,
+      size,
+      timestamp: parseInt(trade.timestamp, 10) * 1000, // Convert seconds to ms
+      orderId: ourMakerOrder.order_id,
+      status: trade.status === "RETRYING" ? "MATCHED" : trade.status,
+      outcome: ourMakerOrder.outcome, // Include for debugging
+    };
+  }
+  
+  // We're the TAKER - use trade-level fields
+  // The trade-level outcome and side represent the taker's perspective (which is us)
+  const isYesOutcome = trade.outcome.toLowerCase() === "yes";
+  const tokenId = isYesOutcome ? tokenMapping.yesTokenId : tokenMapping.noTokenId;
+  
   return {
     id: trade.id,
-    tokenId: trade.asset_id,
+    tokenId,
     conditionId: trade.market,
-    side: ourSide,
+    side: trade.side, // Taker's side is directly reported
     price: parseFloat(trade.price),
     size: parseFloat(trade.size),
     timestamp: parseInt(trade.timestamp, 10) * 1000, // Convert seconds to ms
     orderId: trade.taker_order_id,
-    status: trade.status === "RETRYING" ? "MATCHED" : trade.status, // Map RETRYING to MATCHED
+    status: trade.status === "RETRYING" ? "MATCHED" : trade.status,
+    outcome: trade.outcome, // Include for debugging
   };
 }

@@ -42,4 +42,6 @@ export interface MarketParams {
   minOrderSize: number;
   /** Maximum spread from midpoint for reward eligibility (in cents) */
   maxSpread: number;
+  /** Daily reward pool in USD (for actual earnings calculation) */
+  rewardsDaily?: number;
 }

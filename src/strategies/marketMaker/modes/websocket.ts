@@ -1,32 +1,53 @@
 /**
  * Market Maker WebSocket Mode - Real-time price updates with fallback polling.
+ *
+ * Supports orchestrator integration via:
+ * - `onNeutralPosition`: Callback when neutral position detected (for logging)
+ * - `onCheckPendingSwitch`: Callback after fills to check if should exit (returns true to stop)
+ * - Returns `MarketMakerResult` with exit reason and final state
  */
 
 import { log } from "@/utils/helpers.js";
 import { getMidpoint } from "@/utils/orders.js";
 import { PolymarketWebSocket, TrailingDebounce } from "@/utils/websocket.js";
-import { UserWebSocket, tradeEventToFill } from "@/utils/userWebsocket.js";
+import { UserWebSocket, tradeEventToFill, type TokenIdMapping, type OrderLookup } from "@/utils/userWebsocket.js";
+import { getOrderTracker } from "@/utils/orderTracker.js";
+import { createSafeForCtf, type SafeInstance } from "@/utils/ctf.js";
+import { getEnvRequired } from "@/utils/env.js";
 import { shouldRebalance } from "../quoter.js";
 import { placeQuotes, cancelExistingOrders } from "../executor.js";
-import { createInitialState, createShutdownHandler, registerShutdownHandlers, createPositionTracker } from "../lifecycle.js";
+import { createInitialState, createShutdownHandler, registerShutdownHandlers, createPositionTracker, checkAndMergeNeutralPosition } from "../lifecycle.js";
 import type { ClobClient } from "@polymarket/clob-client";
-import type { MarketMakerConfig, MarketMakerState } from "../types.js";
+import type { MarketMakerConfig, MarketMakerState, MarketMakerResult, OrchestratableMarketMakerConfig } from "../types.js";
 import type { PositionTracker } from "@/utils/positionTracker.js";
 
 export interface WebSocketRunnerContext {
-  config: MarketMakerConfig;
+  config: MarketMakerConfig | OrchestratableMarketMakerConfig;
   client: ClobClient;
 }
 
 /**
  * Runs the market maker with WebSocket real-time updates.
  * Falls back to polling when WebSocket is disconnected.
+ *
+ * @returns MarketMakerResult with exit reason and final state
  */
-export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<void> {
+export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<MarketMakerResult> {
   const { config, client } = ctx;
+
+  // Extract orchestrator options (with defaults for backward compatibility)
+  const onNeutralPosition = (config as OrchestratableMarketMakerConfig).onNeutralPosition;
+  const onCheckPendingSwitch = (config as OrchestratableMarketMakerConfig).onCheckPendingSwitch;
 
   // Initialize state
   const state: MarketMakerState = createInitialState();
+
+  // Track exit reason for return value
+  let exitReason: MarketMakerResult["reason"] = "shutdown";
+  let exitError: Error | undefined;
+
+  // Resolver for the main loop promise (used for pending switch exit)
+  let resolveMainLoop: (() => void) | null = null;
 
   // Lock to prevent concurrent rebalances
   let isRebalancing = false;
@@ -37,44 +58,133 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<voi
   // Initialize position tracker for position limits
   const positionTracker: PositionTracker | null = await createPositionTracker(client, config);
 
+  // Initialize Safe instance for CTF operations (merge)
+  // Only needed if merge is enabled and not in dry run mode
+  let safe: SafeInstance | null = null;
+  if (config.merge.enabled && !config.dryRun) {
+    try {
+      log("Initializing Safe for CTF operations (merge)...");
+      safe = await createSafeForCtf({
+        signerPrivateKey: getEnvRequired("FUNDER_PRIVATE_KEY"),
+        safeAddress: getEnvRequired("POLYMARKET_PROXY_ADDRESS"),
+      });
+      log("Safe initialized for merge operations");
+    } catch (error) {
+      log(`Warning: Failed to initialize Safe for merge: ${error}`);
+      log("Merge operations will be disabled");
+    }
+  }
+
   // User WebSocket for fill notifications (only if position tracking is enabled)
   let userWs: UserWebSocket | null = null;
+
+  /**
+   * Checks if orchestrator has a pending switch and we're neutral.
+   * If so, signals the market maker to stop.
+   */
+  const checkPendingSwitchAndMaybeExit = (): void => {
+    if (!positionTracker || !onCheckPendingSwitch) return;
+    
+    const position = positionTracker.getPositionState();
+    const shouldStop = onCheckPendingSwitch({
+      yesTokens: position.yesTokens,
+      noTokens: position.noTokens,
+      netExposure: position.netExposure,
+      neutralPosition: position.neutralPosition,
+    });
+    
+    if (shouldStop) {
+      log("");
+      log("╔════════════════════════════════════════════════════════════════╗");
+      log("║  PENDING SWITCH READY - Position is neutral, stopping...       ║");
+      log("╚════════════════════════════════════════════════════════════════╝");
+      log(`  YES: ${position.yesTokens.toFixed(2)}, NO: ${position.noTokens.toFixed(2)}`);
+      
+      exitReason = "neutral";
+      state.running = false;
+      if (resolveMainLoop) {
+        resolveMainLoop();
+      }
+    }
+  };
 
   /**
    * Executes a rebalance cycle.
    * @param midpoint - Current market midpoint
    * @param source - Source of the rebalance trigger (for logging)
    * @param force - Force rebalance even if midpoint hasn't moved (e.g., position limit change)
+   * @returns true if should continue, false if should exit
    */
-  const executeRebalance = async (midpoint: number, source: string, force: boolean = false): Promise<void> => {
+  const executeRebalance = async (midpoint: number, source: string, force: boolean = false): Promise<boolean> => {
     // Prevent concurrent rebalances
     if (isRebalancing) {
-      return;
+      return true;
     }
     isRebalancing = true;
 
     try {
       state.cycleCount++;
-      log(`Rebalance #${state.cycleCount} | Midpoint: $${midpoint.toFixed(4)} (via ${source})`);
+      
+      // === Check and merge neutral position FIRST ===
+      // This frees up locked USDC before placing new orders
+      const mergeResult = await checkAndMergeNeutralPosition(positionTracker, safe, config);
+      if (mergeResult.merged) {
+        log(`  Merged ${mergeResult.amount.toFixed(2)} neutral tokens -> $${mergeResult.amount.toFixed(2)} USDC freed`);
+        // Update session stats
+        state.stats.mergeCount++;
+        state.stats.totalMerged += mergeResult.amount;
+      }
+
+      // === Notify orchestrator of neutral position (for logging) ===
+      if (positionTracker && onNeutralPosition) {
+        const position = positionTracker.getPositionState();
+        if (position.neutralPosition > 0 && position.netExposure === 0) {
+          onNeutralPosition({
+            yesTokens: position.yesTokens,
+            noTokens: position.noTokens,
+            netExposure: position.netExposure,
+            neutralPosition: position.neutralPosition,
+          });
+        }
+      }
+      
+      // Build rebalance log line with P&L if position tracking is enabled
+      let logLine = `Rebalance #${state.cycleCount} | Mid: $${midpoint.toFixed(4)} (${source})`;
+      if (positionTracker) {
+        logLine += ` | ${positionTracker.formatPnLCompact(midpoint)}`;
+      }
+      log(logLine);
 
       // Check if we need to rebalance
       const hasQuotes = state.activeQuotes.yesQuote !== null || state.activeQuotes.noQuote !== null;
       const needsRebalance =
         force ||
+        mergeResult.merged || // Force rebalance after merge to reflect new USDC balance
         !hasQuotes ||
         shouldRebalance(midpoint, state.activeQuotes.lastMidpoint, config.rebalanceThreshold);
 
       if (needsRebalance) {
-        const reason = force ? "Position limit changed" : (!hasQuotes ? "No active quotes" : "Midpoint moved");
+        const reason = mergeResult.merged
+          ? "Merged neutral position"
+          : force
+            ? "Position limit changed"
+            : !hasQuotes
+              ? "No active quotes"
+              : "Midpoint moved";
         log(`  ${reason}, rebalancing...`);
 
         // Cancel existing orders
         if (hasQuotes) {
           await cancelExistingOrders(client, config);
+          state.stats.ordersCancelled += 2; // YES + NO orders
         }
 
         // Place new quotes
         state.activeQuotes = await placeQuotes(client, config, midpoint, positionTracker);
+        state.stats.rebalanceCount++;
+        // Count orders placed (1 for each non-null quote)
+        if (state.activeQuotes.yesQuote) state.stats.ordersPlaced++;
+        if (state.activeQuotes.noQuote) state.stats.ordersPlaced++;
         state.lastError = null;
       } else {
         const yesInfo = state.activeQuotes.yesQuote
@@ -85,10 +195,12 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<voi
           : "none";
         log(`  Quotes still valid (YES: ${yesInfo}, NO: ${noInfo})`);
       }
+      return true; // Continue running
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       log(`  ERROR: ${errorMsg}`);
       state.lastError = errorMsg;
+      return true; // Continue despite error
     } finally {
       isRebalancing = false;
     }
@@ -182,23 +294,38 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<voi
     // Connect to user WebSocket for fill notifications (if position tracking enabled)
     if (positionTracker && client.creds) {
       log("Connecting to user WebSocket for fill tracking...");
+      
+      // Create token mapping for fill conversion
+      const tokenMapping: TokenIdMapping = {
+        yesTokenId: config.market.yesTokenId,
+        noTokenId: config.market.noTokenId,
+      };
+      
       userWs = new UserWebSocket({
         apiKey: client.creds.key,
         apiSecret: client.creds.secret,
         passphrase: client.creds.passphrase,
         onTrade: async (trade) => {
-          // Only process trades for our market's tokens
-          if (
-            trade.asset_id === config.market.yesTokenId ||
-            trade.asset_id === config.market.noTokenId
-          ) {
+          // Filter by market condition ID (not asset_id, since NO trades report YES asset_id)
+          if (trade.market === config.market.conditionId) {
             // Capture limit status BEFORE processing fill
             const limitStatusBefore = positionTracker.getLimitStatus();
             
-            const fill = tradeEventToFill(trade);
+            // Pass our API key and order tracker for correct maker/taker attribution
+            const orderTracker = getOrderTracker();
+            const fill = tradeEventToFill(trade, tokenMapping, client.creds?.key ?? "", orderTracker);
+            
             const isNew = positionTracker.processFill(fill);
             
             if (isNew) {
+              // Update session stats
+              state.stats.fillCount++;
+              state.stats.totalVolume += fill.price * fill.size;
+              
+              // Log P&L after fill (uses current midpoint)
+              const currentMidpoint = debounce.getLatestValue() ?? 0.5;
+              log(positionTracker.formatPnLStatus(currentMidpoint));
+              
               // Check if position limits status changed AFTER processing fill
               const limitStatusAfter = positionTracker.getLimitStatus();
               
@@ -210,7 +337,7 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<voi
                 limitStatusBefore.isLimitReached !== limitStatusAfter.isLimitReached ||
                 limitStatusBefore.blockedSide !== limitStatusAfter.blockedSide;
               
-              if (limitChanged) {
+                if (limitChanged) {
                 log("  Position limit status changed, triggering rebalance...");
                 
                 // Get current midpoint for rebalance
@@ -231,6 +358,10 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<voi
                     });
                 }
               }
+              
+              // Check if orchestrator wants to switch (after each fill)
+              // This allows the orchestrator to exit when: pendingSwitch exists AND neutral
+              checkPendingSwitchAndMaybeExit();
             }
           }
         },
@@ -273,6 +404,7 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<voi
   // Keep the process running
   // The event loop is kept alive by WebSocket and timers
   await new Promise<void>((resolve) => {
+    resolveMainLoop = resolve;
     const checkInterval = setInterval(() => {
       if (!state.running) {
         clearInterval(checkInterval);
@@ -280,4 +412,16 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<voi
       }
     }, 1000);
   });
+
+  // Build and return result
+  const finalPosition = positionTracker
+    ? positionTracker.getPositionState()
+    : undefined;
+
+  return {
+    reason: exitReason,
+    finalPosition,
+    error: exitError,
+    stats: state.stats,
+  };
 }

@@ -4,6 +4,8 @@
  * General-purpose utilities used across the application.
  */
 
+import * as readline from "readline";
+
 /**
  * Sleeps for a given number of milliseconds.
  *
@@ -58,4 +60,81 @@ export function createLogger(prefix?: string): (message: string) => void {
  */
 export function log(message: string): void {
   console.log(`[${formatTimestamp()}] ${message}`);
+}
+
+/**
+ * Formats a duration in milliseconds to a human-readable string.
+ *
+ * @param ms - Duration in milliseconds
+ * @returns Formatted string like "2h 30m 15s" or "45m 12s"
+ *
+ * @example
+ * formatDuration(3661000); // "1h 1m 1s"
+ * formatDuration(45000);   // "45s"
+ */
+export function formatDuration(ms: number): string {
+  const seconds = Math.floor(ms / 1000) % 60;
+  const minutes = Math.floor(ms / (1000 * 60)) % 60;
+  const hours = Math.floor(ms / (1000 * 60 * 60));
+
+  const parts: string[] = [];
+  if (hours > 0) parts.push(`${hours}h`);
+  if (minutes > 0) parts.push(`${minutes}m`);
+  if (seconds > 0 || parts.length === 0) parts.push(`${seconds}s`);
+
+  return parts.join(" ");
+}
+
+/**
+ * Prompts the user for input from stdin.
+ *
+ * @param question - The prompt to display
+ * @returns Promise that resolves with the user's input
+ */
+export function promptForInput(question: string): Promise<string> {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+
+    rl.question(question, (answer: string) => {
+      rl.close();
+      resolve(answer.trim());
+    });
+  });
+}
+
+/**
+ * Prompts for a numeric input with validation.
+ *
+ * @param question - The prompt to display
+ * @param min - Minimum allowed value
+ * @param max - Maximum allowed value
+ * @returns Promise that resolves with the number, or null if skipped/invalid
+ */
+export async function promptForNumber(
+  question: string,
+  min: number = 0,
+  max: number = 1
+): Promise<number | null> {
+  const answer = await promptForInput(question);
+
+  // Allow skipping
+  if (answer === "" || answer.toLowerCase() === "skip" || answer.toLowerCase() === "n") {
+    return null;
+  }
+
+  const num = parseFloat(answer);
+  if (isNaN(num)) {
+    log(`Invalid number: ${answer}`);
+    return null;
+  }
+
+  if (num < min || num > max) {
+    log(`Number ${num} is out of range [${min}, ${max}]`);
+    return null;
+  }
+
+  return num;
 }

@@ -7,7 +7,7 @@
  *   npm run selectMarket -- <event-slug-or-url>
  */
 
-import type { MarketMakerConfig, WebSocketConfig, PositionLimitsConfig } from "./types.js";
+import type { MarketMakerConfig, WebSocketConfig, PositionLimitsConfig, MergeConfig } from "./types.js";
 import type { MarketParams } from "@/types/strategy.js";
 
 /**
@@ -25,6 +25,16 @@ export const DEFAULT_POSITION_LIMITS: PositionLimitsConfig = {
    * E.g., 0.8 means warn when at 80% of limit.
    */
   warnThreshold: 0.8,
+};
+
+/**
+ * Default merge configuration for neutral position consolidation.
+ */
+export const DEFAULT_MERGE_CONFIG: MergeConfig = {
+  /** Enable automatic merging of neutral positions */
+  enabled: true,
+  /** Merge any neutral position (minMergeAmount = 0) */
+  minMergeAmount: 0,
 };
 
 /**
@@ -62,6 +72,8 @@ export const DEFAULT_STRATEGY_PARAMS = {
   positionLimits: DEFAULT_POSITION_LIMITS,
   /** WebSocket configuration */
   webSocket: DEFAULT_WEBSOCKET_PARAMS,
+  /** Merge configuration for neutral position consolidation */
+  merge: DEFAULT_MERGE_CONFIG,
   /** Dry run mode - ENABLED BY DEFAULT FOR SAFETY */
   dryRun: true,
 } as const;
@@ -98,6 +110,10 @@ export function createMarketMakerConfig(
     webSocket: {
       ...DEFAULT_WEBSOCKET_PARAMS,
       ...overrides?.webSocket,
+    },
+    merge: {
+      ...DEFAULT_MERGE_CONFIG,
+      ...overrides?.merge,
     },
     dryRun: overrides?.dryRun ?? DEFAULT_STRATEGY_PARAMS.dryRun,
   };
@@ -136,21 +152,22 @@ export const MARKET_CONFIG: MarketParams = {
   // Tick size - minimum price increment
   tickSize: "0.01",
 
-  // Not a negative risk market (binary Yes/No)
+  // Negative risk market (multi-outcome)
   negRisk: false,
 
-  // Minimum order size for rewards eligibility (from rewardsMinSize)
+  // Minimum order size for rewards eligibility
   minOrderSize: 20,
 
-  // Maximum spread from midpoint for reward eligibility (from rewardsMaxSpread)
-  maxSpread: 4.5,
+  // Maximum spread from midpoint for reward eligibility (cents)
+  // Check Gamma API for current rewardsMaxSpread value
+  maxSpread: 4,
 };
 
 /**
  * Strategy parameter overrides.
  */
 export const STRATEGY_OVERRIDES: Partial<Omit<MarketMakerConfig, "market">> = {
-  // 20 shares per side (above 20 minimum for rewards)
+  // Shares per side
   orderSize: 20,
 
   // Quote at 50% of max spread (e.g., 2.25c from midpoint if maxSpread=4.5)

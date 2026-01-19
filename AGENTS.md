@@ -37,6 +37,50 @@ Keep the `ARCHITECTURE.md` file:
 - Organized by logical sections
 - Including file paths for easy reference
 
+## Subagent Delegation Rule
+
+**PRIORITY**: Delegate investigation tasks to subagents to preserve main context capacity for problem-solving.
+
+### Why Use Subagents
+- **Context preservation** - The main conversation has limited context; investigations can consume significant capacity
+- **Focused problem-solving** - Keep the main context clean for actual implementation and decision-making
+- **Parallel exploration** - Multiple subagents can investigate different aspects simultaneously
+- **Better results** - Subagents can dive deep without cluttering the main conversation
+
+### When to Delegate to Subagents
+- **Codebase exploration** - Finding files, understanding structure, tracing dependencies
+- **Bug investigation** - Searching for error sources, understanding call chains
+- **Research tasks** - Looking up patterns, finding examples in the codebase
+- **Understanding existing code** - Reading multiple files to understand how something works
+- **Finding all occurrences** - Searching for usages of a function, type, or pattern
+
+### When NOT to Delegate
+- Simple, single-file reads
+- Direct questions with known file locations
+- Tasks that require immediate user interaction
+- Final implementation after investigation is complete
+
+### How to Delegate Effectively
+1. **Be specific** - Give clear, focused instructions to the subagent
+2. **Request summaries** - Ask subagents to return concise findings, not raw data
+3. **Use parallel agents** - Launch multiple subagents for independent investigations
+4. **Act on results** - Use subagent findings for implementation in the main context
+
+### Example Pattern
+```
+User: "Fix the bug where market prices aren't updating"
+
+Good approach:
+1. Launch subagent: "Find all files that handle market price updates and identify the data flow"
+2. Receive summary of relevant files and flow
+3. Use main context capacity for analyzing the bug and implementing the fix
+
+Bad approach:
+1. Manually search through 20+ files in main context
+2. Read multiple large files trying to understand the flow
+3. Run out of context before implementing the fix
+```
+
 ## TypeScript Type Usage Rule
 
 **PRIORITY**: Always prefer library-exported types over custom type definitions.
