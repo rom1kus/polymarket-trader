@@ -9,6 +9,29 @@ import type { PositionLimitsConfig } from "@/types/fills.js";
 export type { PositionLimitsConfig } from "@/types/fills.js";
 
 /**
+ * Configuration for automatic merging of neutral positions.
+ *
+ * When enabled, the strategy will automatically merge equal amounts of
+ * YES + NO tokens back into USDC, freeing up locked capital for trading.
+ */
+export interface MergeConfig {
+  /**
+   * Enable automatic merging of neutral positions.
+   * When true, neutral positions are merged before placing orders.
+   * @default true
+   */
+  enabled: boolean;
+
+  /**
+   * Minimum neutral position to trigger merge.
+   * Neutral position = min(yesTokens, noTokens).
+   * Set to 0 to merge any neutral position.
+   * @default 0
+   */
+  minMergeAmount: number;
+}
+
+/**
  * WebSocket configuration options.
  */
 export interface WebSocketConfig {
@@ -75,6 +98,8 @@ export interface MarketMakerConfig {
   positionLimits: PositionLimitsConfig;
   /** WebSocket configuration for real-time price updates */
   webSocket: WebSocketConfig;
+  /** Merge configuration for automatic neutral position consolidation */
+  merge: MergeConfig;
   /**
    * Dry run mode - simulate without placing real orders.
    * Set to true for safe testing.
@@ -123,6 +148,28 @@ export interface ActiveQuotes {
 }
 
 /**
+ * Session statistics for tracking trading activity.
+ */
+export interface SessionStats {
+  /** Start time of the session */
+  startTime: number;
+  /** Number of fills received this session */
+  fillCount: number;
+  /** Total volume traded (buys + sells) */
+  totalVolume: number;
+  /** Number of merges performed this session */
+  mergeCount: number;
+  /** Total amount of tokens merged (USDC freed) */
+  totalMerged: number;
+  /** Number of rebalances performed */
+  rebalanceCount: number;
+  /** Number of orders placed */
+  ordersPlaced: number;
+  /** Number of orders cancelled */
+  ordersCancelled: number;
+}
+
+/**
  * State of the market maker
  */
 export interface MarketMakerState {
@@ -130,4 +177,6 @@ export interface MarketMakerState {
   activeQuotes: ActiveQuotes;
   cycleCount: number;
   lastError: string | null;
+  /** Session statistics for shutdown summary */
+  stats: SessionStats;
 }

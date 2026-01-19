@@ -7,9 +7,11 @@ import { getMidpoint } from "@/utils/orders.js";
 import { PolymarketWebSocket, TrailingDebounce } from "@/utils/websocket.js";
 import { UserWebSocket, tradeEventToFill, type TokenIdMapping, type OrderLookup } from "@/utils/userWebsocket.js";
 import { getOrderTracker } from "@/utils/orderTracker.js";
+import { createSafeForCtf, type SafeInstance } from "@/utils/ctf.js";
+import { getEnvRequired } from "@/utils/env.js";
 import { shouldRebalance } from "../quoter.js";
 import { placeQuotes, cancelExistingOrders } from "../executor.js";
-import { createInitialState, createShutdownHandler, registerShutdownHandlers, createPositionTracker } from "../lifecycle.js";
+import { createInitialState, createShutdownHandler, registerShutdownHandlers, createPositionTracker, checkAndMergeNeutralPosition } from "../lifecycle.js";
 import type { ClobClient } from "@polymarket/clob-client";
 import type { MarketMakerConfig, MarketMakerState } from "../types.js";
 import type { PositionTracker } from "@/utils/positionTracker.js";
@@ -38,6 +40,23 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<voi
   // Initialize position tracker for position limits
   const positionTracker: PositionTracker | null = await createPositionTracker(client, config);
 
+  // Initialize Safe instance for CTF operations (merge)
+  // Only needed if merge is enabled and not in dry run mode
+  let safe: SafeInstance | null = null;
+  if (config.merge.enabled && !config.dryRun) {
+    try {
+      log("Initializing Safe for CTF operations (merge)...");
+      safe = await createSafeForCtf({
+        signerPrivateKey: getEnvRequired("FUNDER_PRIVATE_KEY"),
+        safeAddress: getEnvRequired("POLYMARKET_PROXY_ADDRESS"),
+      });
+      log("Safe initialized for merge operations");
+    } catch (error) {
+      log(`Warning: Failed to initialize Safe for merge: ${error}`);
+      log("Merge operations will be disabled");
+    }
+  }
+
   // User WebSocket for fill notifications (only if position tracking is enabled)
   let userWs: UserWebSocket | null = null;
 
@@ -57,6 +76,16 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<voi
     try {
       state.cycleCount++;
       
+      // === Check and merge neutral position FIRST ===
+      // This frees up locked USDC before placing new orders
+      const mergeResult = await checkAndMergeNeutralPosition(positionTracker, safe, config);
+      if (mergeResult.merged) {
+        log(`  Merged ${mergeResult.amount.toFixed(2)} neutral tokens -> $${mergeResult.amount.toFixed(2)} USDC freed`);
+        // Update session stats
+        state.stats.mergeCount++;
+        state.stats.totalMerged += mergeResult.amount;
+      }
+      
       // Build rebalance log line with P&L if position tracking is enabled
       let logLine = `Rebalance #${state.cycleCount} | Mid: $${midpoint.toFixed(4)} (${source})`;
       if (positionTracker) {
@@ -68,20 +97,32 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<voi
       const hasQuotes = state.activeQuotes.yesQuote !== null || state.activeQuotes.noQuote !== null;
       const needsRebalance =
         force ||
+        mergeResult.merged || // Force rebalance after merge to reflect new USDC balance
         !hasQuotes ||
         shouldRebalance(midpoint, state.activeQuotes.lastMidpoint, config.rebalanceThreshold);
 
       if (needsRebalance) {
-        const reason = force ? "Position limit changed" : (!hasQuotes ? "No active quotes" : "Midpoint moved");
+        const reason = mergeResult.merged
+          ? "Merged neutral position"
+          : force
+            ? "Position limit changed"
+            : !hasQuotes
+              ? "No active quotes"
+              : "Midpoint moved";
         log(`  ${reason}, rebalancing...`);
 
         // Cancel existing orders
         if (hasQuotes) {
           await cancelExistingOrders(client, config);
+          state.stats.ordersCancelled += 2; // YES + NO orders
         }
 
         // Place new quotes
         state.activeQuotes = await placeQuotes(client, config, midpoint, positionTracker);
+        state.stats.rebalanceCount++;
+        // Count orders placed (1 for each non-null quote)
+        if (state.activeQuotes.yesQuote) state.stats.ordersPlaced++;
+        if (state.activeQuotes.noQuote) state.stats.ordersPlaced++;
         state.lastError = null;
       } else {
         const yesInfo = state.activeQuotes.yesQuote
@@ -203,24 +244,6 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<voi
         onTrade: async (trade) => {
           // Filter by market condition ID (not asset_id, since NO trades report YES asset_id)
           if (trade.market === config.market.conditionId) {
-            // === VERBOSE DEBUG LOGGING ===
-            log(`[DEBUG] Raw trade event:`);
-            log(`  id: ${trade.id}`);
-            log(`  side: ${trade.side}, price: ${trade.price}, size: ${trade.size}`);
-            log(`  outcome: ${trade.outcome}, asset_id: ${trade.asset_id.substring(0, 20)}...`);
-            log(`  owner: ${trade.owner.substring(0, 16)}...`);
-            log(`  trade_owner: ${trade.trade_owner.substring(0, 16)}...`);
-            log(`  taker_order_id: ${trade.taker_order_id.substring(0, 16)}...`);
-            log(`  maker_orders (${trade.maker_orders.length}):`);
-            for (const mo of trade.maker_orders) {
-              log(`    - order_id: ${mo.order_id.substring(0, 16)}...`);
-              log(`      outcome: ${mo.outcome}, price: ${mo.price}, matched: ${mo.matched_amount}`);
-              log(`      owner: ${mo.owner.substring(0, 16)}...`);
-              log(`      asset_id: ${mo.asset_id.substring(0, 20)}...`);
-            }
-            log(`  Our API key: ${client.creds?.key.substring(0, 16)}...`);
-            // === END DEBUG LOGGING ===
-            
             // Capture limit status BEFORE processing fill
             const limitStatusBefore = positionTracker.getLimitStatus();
             
@@ -228,15 +251,13 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<voi
             const orderTracker = getOrderTracker();
             const fill = tradeEventToFill(trade, tokenMapping, client.creds?.key ?? "", orderTracker);
             
-            // Log what we converted the fill to
-            log(`[DEBUG] Converted fill:`);
-            log(`  side: ${fill.side}, price: ${fill.price.toFixed(4)}, size: ${fill.size.toFixed(4)}`);
-            log(`  outcome: ${fill.outcome}, tokenId: ${fill.tokenId.substring(0, 20)}...`);
-            log(`  orderId: ${fill.orderId.substring(0, 16)}...`);
-            
             const isNew = positionTracker.processFill(fill);
             
             if (isNew) {
+              // Update session stats
+              state.stats.fillCount++;
+              state.stats.totalVolume += fill.price * fill.size;
+              
               // Log P&L after fill (uses current midpoint)
               const currentMidpoint = debounce.getLatestValue() ?? 0.5;
               log(positionTracker.formatPnLStatus(currentMidpoint));

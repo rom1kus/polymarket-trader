@@ -23,10 +23,38 @@ The Polymarket CLOB only maintains order books for YES tokens. When you place a 
 - Position tracking uses `outcome` to correctly attribute fills to YES or NO tokens
 
 **Benefits:**
-- No CTF split/merge operations needed during strategy lifecycle
 - Just hold USDC, no need to pre-split into YES+NO tokens
+- **Auto-merge** automatically converts neutral positions back to USDC
 - Easier on/off boarding to markets
 - Same P&L profile as traditional market making
+
+### Auto-Merge Feature
+
+When the bot runs for a while, it can accumulate both YES and NO tokens. If you have `YES > 0` AND `NO > 0`, you have a **neutral position** - tokens that are market-neutral and lock up USDC that could be used for trading.
+
+The **auto-merge** feature automatically:
+1. Detects when you have both YES and NO tokens
+2. Merges them back into USDC via the CTF contract
+3. Frees up locked capital for continued trading
+
+**Example:**
+```
+Before merge:  YES=15, NO=12, USDC=$50
+               Neutral position = min(15, 12) = 12
+               
+After merge:   YES=3, NO=0, USDC=$62
+               Freed $12 USDC for trading!
+```
+
+**Configuration:**
+```typescript
+merge: {
+  enabled: true,      // Enable automatic merging (default: true)
+  minMergeAmount: 0,  // Merge any neutral position (default: 0)
+}
+```
+
+**P&L Economics:** When tokens are merged, the cost basis is adjusted proportionally to maintain accurate P&L tracking.
 
 ## Quick Start
 
@@ -96,10 +124,18 @@ npm run marketMaker
 │   ┌──────────────────────────────────────────────────────────────────────────┐  │
 │   │  On Midpoint Update (from WebSocket)                                      │  │
 │   │  ┌──────────────────┐    ┌──────────────────┐    ┌───────────────────┐   │  │
-│   │  │ TRAILING DEBOUNCE│───▶│ REBALANCE NEEDED?│───▶│    REBALANCE      │   │  │
-│   │  │ (wait 50ms for   │    │ - Threshold check│    │ 1. Cancel old     │   │  │
-│   │  │  price to settle)│    │ - Has quotes?    │    │ 2. Place new      │   │  │
+│   │  │ TRAILING DEBOUNCE│───▶│  AUTO-MERGE      │───▶│ REBALANCE NEEDED? │   │  │
+│   │  │ (wait 50ms for   │    │  Check neutral   │    │ - Threshold check │   │  │
+│   │  │  price to settle)│    │  position, merge │    │ - Has quotes?     │   │  │
+│   │  │                  │    │  if > 0 tokens   │    │ - Merged tokens?  │   │  │
 │   │  └──────────────────┘    └──────────────────┘    └───────────────────┘   │  │
+│   │                                                           │               │  │
+│   │                                                           ▼               │  │
+│   │                                                  ┌───────────────────┐   │  │
+│   │                                                  │    REBALANCE      │   │  │
+│   │                                                  │ 1. Cancel old     │   │  │
+│   │                                                  │ 2. Place new      │   │  │
+│   │                                                  └───────────────────┘   │  │
 │   └──────────────────────────────────────────────────────────────────────────┘  │
 │                                                                                  │
 │   ┌──────────────────────────────────────────────────────────────────────────┐  │
@@ -285,7 +321,16 @@ export const STRATEGY_OVERRIDES = {
   rebalanceThreshold: 0.005,  // 0.5 cents
   
   // Maximum net position exposure (blocks one side when exceeded)
-  maxNetExposure: 100,
+  positionLimits: {
+    maxNetExposure: 100,
+    warnThreshold: 0.8,
+  },
+  
+  // Auto-merge neutral positions back to USDC
+  merge: {
+    enabled: true,      // Enable automatic merging
+    minMergeAmount: 0,  // Merge any neutral position
+  },
 };
 
 // Set to false when ready for live trading
@@ -325,7 +370,6 @@ npm run selectMarket -- nfc-south-winner-11 0 # Generate config for market 0
 | `spreadPercent` | 0.5 | Quote at X% of max spread from midpoint |
 | `refreshIntervalMs` | 30000 | Check/refresh quotes every N ms (polling mode only) |
 | `rebalanceThreshold` | 0.005 | Rebalance if midpoint moves by N (0.5 cents) |
-| `maxNetExposure` | 100 | Maximum net position before blocking one side |
 | `dryRun` | true | Simulate orders without placing them |
 
 ### WebSocket Parameters
@@ -345,14 +389,29 @@ The bot tracks positions and enforces net exposure limits:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `maxNetExposure` | 100 | Maximum YES - NO position before blocking |
-| `warnThreshold` | 0.7 | Warn when at 70% of limit |
+| `positionLimits.maxNetExposure` | 100 | Maximum YES - NO position before blocking |
+| `positionLimits.warnThreshold` | 0.8 | Warn when at 80% of limit |
 
 **How it works:**
 - Net exposure = YES tokens - NO tokens
 - Positive = long YES, Negative = long NO
 - Blocks BUY YES when exposure >= maxNetExposure
 - Blocks BUY NO when exposure <= -maxNetExposure
+
+### Auto-Merge Parameters
+
+The bot automatically merges neutral positions back to USDC:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `merge.enabled` | true | Enable automatic merging of neutral positions |
+| `merge.minMergeAmount` | 0 | Minimum neutral position to trigger merge (0 = any) |
+
+**How it works:**
+- Neutral position = min(YES tokens, NO tokens)
+- When neutral > minMergeAmount, merge is triggered
+- Merging converts equal YES + NO tokens back to USDC
+- P&L cost basis is adjusted proportionally
 
 ### Tuning Guidelines
 
@@ -380,14 +439,14 @@ maxNetExposure: 50,      // Tighter position limits
 src/strategies/marketMaker/
 ├── index.ts       # Main entry point (thin orchestrator)
 ├── config.ts      # Strategy configuration (EDIT THIS!)
-├── types.ts       # TypeScript type definitions
+├── types.ts       # TypeScript type definitions (MergeConfig, WebSocketConfig, SessionStats, etc.)
 ├── quoter.ts      # Quote generation logic (BUY YES + BUY NO)
-├── lifecycle.ts   # Startup/shutdown, validation, banner
+├── lifecycle.ts   # Startup/shutdown, validation, banner, merge check, session summary
 ├── executor.ts    # Order placement and cancellation
 └── modes/         # Execution mode implementations
     ├── index.ts       # Mode exports
-    ├── websocket.ts   # WebSocket real-time runner
-    └── polling.ts     # REST polling runner
+    ├── websocket.ts   # WebSocket real-time runner (includes merge, fill tracking)
+    └── polling.ts     # REST polling runner (includes merge)
 ```
 
 ### Component Interaction
@@ -414,18 +473,17 @@ src/strategies/marketMaker/
 │ validateConfig           │ placeQuotes  │           │generateQuotes│
 │ printBanner  │           │ cancelOrders │           │shouldRebalance
 │ createShutdown           │              │           │estimateScore │
+│ checkAndMerge│           │              │           │              │
 └──────────────┘           └──────────────┘           └──────────────┘
-                                    │
-                                    ▼
-                           ┌──────────────────────────┐
-                           │  @/utils/* (shared)      │
-                           │                          │
-                           │ ● authClient.ts          │
-                           │ ● orders.ts              │
-                           │ ● rewards.ts             │
-                           │ ● websocket.ts           │
-                           │ ● positionTracker.ts     │
-                           └──────────────────────────┘
+        │                           │
+        ▼                           ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                    @/utils/* (shared)                             │
+│                                                                   │
+│ ● authClient.ts      ● websocket.ts       ● positionTracker.ts   │
+│ ● orders.ts          ● inventory.ts       ● ctf.ts (merge)       │
+│ ● rewards.ts         ● safe.ts                                    │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ### Data Flow
@@ -493,8 +551,42 @@ src/strategies/marketMaker/
 [12:05:30] Cancelling orders on NO token...
 [12:05:30] [DRY RUN] Would cancel all orders
 
+============================================================
+  SESSION SUMMARY
+============================================================
+  Duration: 5m 30s
+  Cycles: 12
+------------------------------------------------------------
+  TRADING:
+    Fills: 0
+    Volume: $0.00
+    Orders Placed: 24
+    Orders Cancelled: 22
+------------------------------------------------------------
+  MERGE OPERATIONS:
+    Merges: 0
+    USDC Freed: $0.00
+============================================================
+
 Goodbye!
 ```
+
+### Session Statistics
+
+On shutdown, the bot displays a summary of the session including:
+
+| Statistic | Description |
+|-----------|-------------|
+| Duration | How long the bot ran |
+| Cycles | Number of rebalance cycles |
+| Fills | Number of orders that were filled |
+| Volume | Total dollar volume traded |
+| Orders Placed | Number of orders placed |
+| Orders Cancelled | Number of orders cancelled |
+| Merges | Number of merge operations performed |
+| USDC Freed | Total USDC returned from merging |
+
+This summary helps you understand the bot's activity and efficiency during the session.
 
 ## Risks and Considerations
 
@@ -502,6 +594,11 @@ Goodbye!
 - If one side fills more than the other, you accumulate a position
 - Monitor your net exposure and adjust accordingly
 - **Mitigated**: Position tracker blocks one side when limits exceeded
+
+### Capital Lock-up Risk
+- When you accumulate both YES and NO tokens, capital is locked
+- Neutral position (min of YES, NO) cannot be used for trading
+- **Mitigated**: Auto-merge automatically converts neutral positions back to USDC
 
 ### Execution Risk
 - Orders may get filled between refresh cycles

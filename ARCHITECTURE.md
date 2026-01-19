@@ -32,9 +32,9 @@ polymarket-trader/
 │   │   └── marketMaker/  # Market maker bot for liquidity rewards
 │   │       ├── index.ts      # Main entry point (thin orchestrator)
 │   │       ├── config.ts     # Strategy configuration (edit this!)
-│   │       ├── types.ts      # Strategy-specific types
+│   │       ├── types.ts      # Strategy-specific types (MergeConfig, WebSocketConfig, etc.)
 │   │       ├── quoter.ts     # Quote generation logic
-│   │       ├── lifecycle.ts  # Startup/shutdown, validation, banner
+│   │       ├── lifecycle.ts  # Startup/shutdown, validation, banner, merge check
 │   │       ├── executor.ts   # Order placement, cancellation, splits
 │   │       └── modes/        # Execution mode implementations
 │   │           ├── index.ts      # Mode exports
@@ -219,6 +219,7 @@ Inventory management utilities (uses Safe for CTF operations):
 - `analyzeDeficit(status, requirements)` - Determines if split is needed and how much
 - `runPreFlightChecks(status, requirements, config)` - Validates inventory before starting
 - `ensureSufficientInventory(client, safe, address, ...)` - Splits USDC via Safe if needed
+- `mergeNeutralPosition(safe, conditionId, amount, dryRun)` - Merges YES+NO tokens back to USDC
 - `formatInventoryStatus(status)` - Formats inventory for display
 
 #### `src/utils/client.ts`
@@ -437,13 +438,14 @@ Position tracking for market making strategies with P&L economics:
 - `PositionTracker` - Class for tracking YES/NO positions, limits, and P&L
   - `initialize(yesBalance, noBalance)` - Initialize from current balances, returns `needsCostBasis` flag
   - `processFill(fill)` - Process a fill, update position and economics
+  - `processMerge(mergedAmount)` - Process a merge, adjust position and economics proportionally
   - `canQuoteBuy()` - Check if BUY side is allowed
   - `canQuoteSell()` - Check if SELL side is allowed
-  - `getPositionState()` - Get current position state
+  - `getPositionState()` - Get current position state (includes `neutralPosition`)
   - `getNetExposure()` - Get net exposure (yesTokens - noTokens)
   - `getLimitStatus()` - Get limit utilization status
   - `formatStatus()` - Format position for display
-  - **P&L Methods (new):**
+  - **P&L Methods:**
   - `getAverageCost(tokenType)` - Get weighted average cost per token type
   - `getUnrealizedPnL(midpoint)` - Mark-to-market P&L
   - `getRealizedPnL()` - Accumulated realized P&L from sells
@@ -461,10 +463,16 @@ Position tracking for market making strategies with P&L economics:
 - Blocks BUY when exposure >= maxNetExposure
 - Blocks SELL when exposure <= -maxNetExposure
 
+**Neutral Position (Mergeable):**
+- Neutral position = min(yesTokens, noTokens)
+- Represents market-neutral tokens that can be merged back to USDC
+- Auto-merge frees locked capital for continued trading
+
 **P&L Calculation:**
 - Uses weighted average cost basis
 - Unrealized P&L: `position × (currentPrice - avgCost)`
 - Realized P&L: Accumulated when selling at `(salePrice - avgCost) × size`
+- **On merge:** Economics adjusted proportionally (cost basis reduced by merged ratio)
 
 ### `src/scripts/`
 Directory for executable utility scripts. Each script should:
@@ -531,11 +539,56 @@ Market maker bot for earning Polymarket liquidity rewards.
 **Files:**
 - `index.ts` - Main entry point (thin orchestrator)
 - `config.ts` - Strategy configuration (edit this to set your market!)
-- `types.ts` - Strategy-specific types
+- `types.ts` - Strategy-specific types (`MergeConfig`, `WebSocketConfig`, `PositionLimitsConfig`, `SessionStats`)
 - `quoter.ts` - Quote generation logic
-- `lifecycle.ts` - Startup/shutdown handlers, config validation, banner printing
+- `lifecycle.ts` - Startup/shutdown handlers, config validation, banner printing, merge check, session summary
 - `executor.ts` - Order placement and cancellation
 - `modes/` - Execution mode implementations (WebSocket and polling)
+
+**Auto-Merge Feature:**
+When the bot accumulates both YES and NO tokens (neutral position), it automatically
+merges them back to USDC before placing new orders. This frees up locked capital
+for continued trading.
+
+Configuration in `config.ts`:
+```typescript
+merge: {
+  enabled: true,        // Enable automatic merging
+  minMergeAmount: 0,    // Merge any neutral position (0 = any amount)
+}
+```
+
+Merge lifecycle:
+1. At start of each rebalance cycle, check if `neutralPosition > minMergeAmount`
+2. If yes, execute merge via Safe (CTF `mergePositions`)
+3. Update PositionTracker economics (proportional cost reduction)
+4. Continue with normal quote placement
+
+**Session Statistics:**
+The bot tracks session statistics and displays a summary on shutdown:
+- Duration, cycle count, fills, volume traded
+- Orders placed and cancelled
+- Merge operations performed and USDC freed
+
+Example shutdown summary:
+```
+============================================================
+  SESSION SUMMARY
+============================================================
+  Duration: 2h 15m 30s
+  Cycles: 450
+------------------------------------------------------------
+  TRADING:
+    Fills: 24
+    Volume: $1,234.56
+    Orders Placed: 892
+    Orders Cancelled: 888
+------------------------------------------------------------
+  MERGE OPERATIONS:
+    Merges: 8
+    USDC Freed: $456.78
+============================================================
+```
 
 ## Environment Variables
 
@@ -641,4 +694,4 @@ The Safe SDK (`@safe-global/protocol-kit`) handles:
 - All utilities in `src/utils/`
 
 ---
-*Last updated: 2026-01-16 - Implemented Phase 1: Fill Economics & P&L Tracking (FillEconomics type, PositionTracker P&L methods, initial cost basis prompting, P&L logging on fills/rebalances)*
+*Last updated: 2026-01-19 - Added session statistics tracking and shutdown summary (SessionStats, printSessionSummary, fill/merge/volume tracking)*

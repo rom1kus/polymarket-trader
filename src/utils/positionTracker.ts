@@ -693,6 +693,85 @@ export class PositionTracker {
       noTokens
     );
   }
+
+  /**
+   * Processes a merge operation, adjusting position and economics.
+   *
+   * Merge converts equal amounts of YES + NO tokens back to USDC.
+   * This adjusts the cost basis proportionally:
+   * - Reduces totalYesBought/totalNoBought by mergedAmount
+   * - Reduces totalYesCost/totalNoCost proportionally
+   *
+   * The merged tokens have zero economic impact on P&L since
+   * YES + NO = $1 USDC (the original capital is returned).
+   *
+   * @param mergedAmount - Amount of tokens merged (applies to both YES and NO)
+   */
+  processMerge(mergedAmount: number): void {
+    if (mergedAmount <= 0) {
+      return;
+    }
+
+    const oldState = this.getPositionState();
+
+    // Validate we have enough tokens to merge
+    if (mergedAmount > oldState.neutralPosition) {
+      log(`[PositionTracker] Warning: Merge amount ${mergedAmount} exceeds neutral position ${oldState.neutralPosition}`);
+      return;
+    }
+
+    // Adjust token balances
+    this.yesTokens -= mergedAmount;
+    this.noTokens -= mergedAmount;
+
+    // Adjust economics proportionally
+    // For YES tokens: reduce totalBought and totalCost proportionally
+    if (this.economics.totalYesBought > 0) {
+      const yesReductionRatio = Math.min(1, mergedAmount / this.economics.totalYesBought);
+      const yesCostReduction = this.economics.totalYesCost * yesReductionRatio;
+      
+      this.economics.totalYesBought -= mergedAmount;
+      this.economics.totalYesCost -= yesCostReduction;
+      
+      // Ensure non-negative values
+      this.economics.totalYesBought = Math.max(0, this.economics.totalYesBought);
+      this.economics.totalYesCost = Math.max(0, this.economics.totalYesCost);
+    }
+
+    // For NO tokens: reduce totalBought and totalCost proportionally
+    if (this.economics.totalNoBought > 0) {
+      const noReductionRatio = Math.min(1, mergedAmount / this.economics.totalNoBought);
+      const noCostReduction = this.economics.totalNoCost * noReductionRatio;
+      
+      this.economics.totalNoBought -= mergedAmount;
+      this.economics.totalNoCost -= noCostReduction;
+      
+      // Ensure non-negative values
+      this.economics.totalNoBought = Math.max(0, this.economics.totalNoBought);
+      this.economics.totalNoCost = Math.max(0, this.economics.totalNoCost);
+    }
+
+    // Persist the updated state
+    this.saveEconomics();
+    
+    // Update initial position to reflect new balances
+    setInitialPosition(
+      this.conditionId,
+      this.yesTokenId,
+      this.noTokenId,
+      this.yesTokens,
+      this.noTokens
+    );
+
+    const newState = this.getPositionState();
+
+    log(
+      `[PositionTracker] Merge processed: ${mergedAmount.toFixed(2)} tokens\n` +
+      `  Before: YES=${oldState.yesTokens.toFixed(2)}, NO=${oldState.noTokens.toFixed(2)}, Neutral=${oldState.neutralPosition.toFixed(2)}\n` +
+      `  After:  YES=${newState.yesTokens.toFixed(2)}, NO=${newState.noTokens.toFixed(2)}, Neutral=${newState.neutralPosition.toFixed(2)}\n` +
+      `  USDC freed: $${mergedAmount.toFixed(2)}`
+    );
+  }
 }
 
 /**

@@ -5,7 +5,9 @@
 import { log, promptForNumber } from "@/utils/helpers.js";
 import { cancelOrdersForToken } from "@/utils/orders.js";
 import { getTokenBalance } from "@/utils/balance.js";
+import { mergeNeutralPosition } from "@/utils/inventory.js";
 import { PositionTracker } from "@/utils/positionTracker.js";
+import type { SafeInstance } from "@/utils/ctf.js";
 import type { ClobClient } from "@polymarket/clob-client";
 import type { JsonRpcProvider } from "@ethersproject/providers";
 import type { MarketMakerConfig, MarketMakerState } from "./types.js";
@@ -68,6 +70,22 @@ export function printBanner(config: MarketMakerConfig): void {
 }
 
 /**
+ * Creates empty session statistics.
+ */
+export function createEmptyStats(): import("./types.js").SessionStats {
+  return {
+    startTime: Date.now(),
+    fillCount: 0,
+    totalVolume: 0,
+    mergeCount: 0,
+    totalMerged: 0,
+    rebalanceCount: 0,
+    ordersPlaced: 0,
+    ordersCancelled: 0,
+  };
+}
+
+/**
  * Creates initial market maker state.
  */
 export function createInitialState(): MarketMakerState {
@@ -76,7 +94,51 @@ export function createInitialState(): MarketMakerState {
     activeQuotes: { yesQuote: null, noQuote: null, lastMidpoint: 0 },
     cycleCount: 0,
     lastError: null,
+    stats: createEmptyStats(),
   };
+}
+
+/**
+ * Formats session duration as human-readable string.
+ */
+function formatDuration(startTime: number): string {
+  const durationMs = Date.now() - startTime;
+  const seconds = Math.floor(durationMs / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  
+  if (hours > 0) {
+    return `${hours}h ${minutes % 60}m ${seconds % 60}s`;
+  } else if (minutes > 0) {
+    return `${minutes}m ${seconds % 60}s`;
+  } else {
+    return `${seconds}s`;
+  }
+}
+
+/**
+ * Prints the session statistics summary on shutdown.
+ */
+function printSessionSummary(state: MarketMakerState): void {
+  const { stats } = state;
+  const duration = formatDuration(stats.startTime);
+  
+  console.log("\n" + "=".repeat(60));
+  console.log("  SESSION SUMMARY");
+  console.log("=".repeat(60));
+  console.log(`  Duration: ${duration}`);
+  console.log(`  Cycles: ${state.cycleCount}`);
+  console.log("-".repeat(60));
+  console.log("  TRADING:");
+  console.log(`    Fills: ${stats.fillCount}`);
+  console.log(`    Volume: $${stats.totalVolume.toFixed(2)}`);
+  console.log(`    Orders Placed: ${stats.ordersPlaced}`);
+  console.log(`    Orders Cancelled: ${stats.ordersCancelled}`);
+  console.log("-".repeat(60));
+  console.log("  MERGE OPERATIONS:");
+  console.log(`    Merges: ${stats.mergeCount}`);
+  console.log(`    USDC Freed: $${stats.totalMerged.toFixed(2)}`);
+  console.log("=".repeat(60));
 }
 
 /**
@@ -112,6 +174,9 @@ export function createShutdownHandler(
     } catch (error) {
       log(`Error cancelling orders: ${error}`);
     }
+
+    // Print session summary
+    printSessionSummary(state);
 
     console.log("\nGoodbye!");
     process.exit(0);
@@ -240,5 +305,100 @@ async function promptForInitialCostBasis(
   tracker.setInitialCostBasis(yesCost, noCost);
 
   console.log("-".repeat(60) + "\n");
+}
+
+/**
+ * Result of a merge check operation.
+ */
+export interface MergeCheckResult {
+  /** Whether a merge was performed */
+  merged: boolean;
+  /** Amount that was merged (0 if no merge) */
+  amount: number;
+  /** Error message if merge failed */
+  error?: string;
+}
+
+/**
+ * Checks if neutral position should be merged and executes merge if needed.
+ *
+ * This function is called at the start of each rebalance cycle, before
+ * placing orders. It checks if there's a neutral position (YES > 0 && NO > 0)
+ * that exceeds the configured minimum merge amount, and if so, merges it
+ * back to USDC.
+ *
+ * The merge operation:
+ * 1. Converts equal amounts of YES + NO tokens back to USDC
+ * 2. Updates the position tracker's economics (proportional cost reduction)
+ * 3. Frees up locked capital for trading
+ *
+ * @param positionTracker - Position tracker instance (null if tracking disabled)
+ * @param safe - Safe instance for CTF operations (null if merge disabled)
+ * @param config - Market maker configuration
+ * @returns Result with merged amount (0 if no merge needed or disabled)
+ */
+export async function checkAndMergeNeutralPosition(
+  positionTracker: PositionTracker | null,
+  safe: SafeInstance | null,
+  config: MarketMakerConfig
+): Promise<MergeCheckResult> {
+  // Skip if position tracking is disabled
+  if (!positionTracker) {
+    return { merged: false, amount: 0 };
+  }
+
+  // Skip if merge is disabled
+  if (!config.merge.enabled) {
+    return { merged: false, amount: 0 };
+  }
+
+  // Get current position state
+  const positionState = positionTracker.getPositionState();
+  const neutralPosition = positionState.neutralPosition;
+
+  // Skip if neutral position is below threshold
+  if (neutralPosition <= config.merge.minMergeAmount) {
+    return { merged: false, amount: 0 };
+  }
+
+  // Calculate amount to merge (floor to avoid dust)
+  // Merge the full neutral position to maximize USDC freed
+  const mergeAmount = Math.floor(neutralPosition * 100) / 100; // Round to 2 decimals
+
+  if (mergeAmount <= 0) {
+    return { merged: false, amount: 0 };
+  }
+
+  log(`Neutral position detected: ${neutralPosition.toFixed(2)} tokens (YES=${positionState.yesTokens.toFixed(2)}, NO=${positionState.noTokens.toFixed(2)})`);
+  log(`Merging ${mergeAmount.toFixed(2)} tokens back to USDC...`);
+
+  // Check if we have a Safe instance
+  if (!safe) {
+    // Dry run mode - no Safe available
+    log(`[DRY RUN] Would merge ${mergeAmount.toFixed(2)} tokens back to USDC`);
+    
+    // Still update position tracker to simulate the merge
+    positionTracker.processMerge(mergeAmount);
+    
+    return { merged: true, amount: mergeAmount };
+  }
+
+  // Execute the merge
+  const result = await mergeNeutralPosition(
+    safe,
+    config.market.conditionId,
+    mergeAmount,
+    config.dryRun
+  );
+
+  if (!result.success) {
+    log(`Merge failed: ${result.error}`);
+    return { merged: false, amount: 0, error: result.error };
+  }
+
+  // Update position tracker with the merge
+  positionTracker.processMerge(mergeAmount);
+
+  return { merged: true, amount: mergeAmount };
 }
 

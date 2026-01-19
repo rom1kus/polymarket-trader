@@ -14,11 +14,13 @@ import { getUsdcBalance, getTokenBalance } from "@/utils/balance.js";
 import {
   getMaticBalance,
   approveAndSplitFromSafe,
+  mergePositionsFromSafe,
   type SafeInstance,
 } from "@/utils/ctf.js";
 import { MIN_MATIC_BALANCE } from "@/config/contracts.js";
+import { log } from "@/utils/helpers.js";
 import type { MarketParams } from "@/types/strategy.js";
-import type { InventoryConfig } from "@/types/inventory.js";
+import type { InventoryConfig, CtfOperationResult } from "@/types/inventory.js";
 import type {
   InventoryStatus,
   InventoryRequirements,
@@ -313,4 +315,58 @@ export function formatInventoryStatus(status: InventoryStatus): string {
     `  NO Tokens: ${status.noTokens.toFixed(2)}`,
     `  MATIC: ${status.matic.toFixed(4)}`,
   ].join("\n");
+}
+
+/**
+ * Merges neutral position (equal YES + NO tokens) back to USDC.
+ *
+ * This function merges equal amounts of YES and NO tokens back into USDC,
+ * freeing up locked capital for trading. The merge operation is atomic
+ * and executed through the Safe account.
+ *
+ * @param safe - Initialized Safe instance for transaction execution
+ * @param conditionId - Market condition ID
+ * @param amount - Amount to merge (requires equal YES + NO tokens)
+ * @param dryRun - If true, skip actual merge and return simulated result
+ * @returns Operation result with transaction hash or error
+ *
+ * @example
+ * // Merge 50 YES + 50 NO tokens into $50 USDC
+ * const result = await mergeNeutralPosition(safe, conditionId, 50);
+ */
+export async function mergeNeutralPosition(
+  safe: SafeInstance,
+  conditionId: string,
+  amount: number,
+  dryRun: boolean = false
+): Promise<CtfOperationResult> {
+  if (amount <= 0) {
+    return {
+      success: false,
+      error: "Merge amount must be positive",
+      amount: 0,
+    };
+  }
+
+  if (dryRun) {
+    log(`[DRY RUN] Would merge ${amount.toFixed(2)} tokens back to USDC`);
+    return {
+      success: true,
+      transactionHash: "dry-run-merge-tx",
+      amount,
+    };
+  }
+
+  log(`Merging ${amount.toFixed(2)} tokens back to USDC...`);
+
+  const result = await mergePositionsFromSafe(safe, conditionId, amount);
+
+  if (result.success) {
+    log(`Merge successful: ${amount.toFixed(2)} YES + ${amount.toFixed(2)} NO -> $${amount.toFixed(2)} USDC`);
+    log(`Transaction: ${result.transactionHash}`);
+  } else {
+    log(`Merge failed: ${result.error}`);
+  }
+
+  return result;
 }
