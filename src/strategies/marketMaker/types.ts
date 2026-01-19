@@ -180,3 +180,72 @@ export interface MarketMakerState {
   /** Session statistics for shutdown summary */
   stats: SessionStats;
 }
+
+// =============================================================================
+// Orchestrator Integration Types
+// =============================================================================
+
+/**
+ * Reason why the market maker stopped.
+ * Used by the orchestrator to determine next action.
+ */
+export type MarketMakerExitReason =
+  | "neutral"   // Position reached market-neutral state (netExposure === 0)
+  | "shutdown"  // User-initiated shutdown (SIGINT/SIGTERM)
+  | "error"     // Unrecoverable error
+  | "timeout";  // Timeout waiting for condition (future use)
+
+/**
+ * Result returned when market maker exits.
+ * Used by the orchestrator to make switching decisions.
+ */
+export interface MarketMakerResult {
+  /** Why the market maker stopped */
+  reason: MarketMakerExitReason;
+
+  /**
+   * Final position state (if available).
+   * Contains yesTokens, noTokens, netExposure, neutralPosition.
+   */
+  finalPosition?: {
+    yesTokens: number;
+    noTokens: number;
+    netExposure: number;
+    neutralPosition: number;
+  };
+
+  /** Error details (if reason === "error") */
+  error?: Error;
+
+  /** Session statistics */
+  stats?: SessionStats;
+}
+
+/**
+ * Position state passed to orchestrator callbacks.
+ */
+export interface PositionSnapshot {
+  yesTokens: number;
+  noTokens: number;
+  netExposure: number;
+  neutralPosition: number;
+}
+
+/**
+ * Extended configuration for market maker when run by orchestrator.
+ * Adds options for orchestrator integration.
+ */
+export interface OrchestratableMarketMakerConfig extends MarketMakerConfig {
+  /**
+   * Callback when neutral position is detected (for logging/notification).
+   * Called during rebalance cycle when netExposure === 0 && neutralPosition > 0.
+   */
+  onNeutralPosition?: (position: PositionSnapshot) => void;
+
+  /**
+   * Called after each fill to check if orchestrator wants to switch markets.
+   * Returns true if market maker should stop (pending switch is ready).
+   * The orchestrator sets this to check: pendingSwitch exists AND currently neutral.
+   */
+  onCheckPendingSwitch?: (position: PositionSnapshot) => boolean;
+}

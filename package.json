@@ -9,6 +9,7 @@
     "selectMarket": "tsx src/scripts/selectMarket.ts",
     "findBestMarkets": "tsx src/scripts/findBestMarkets.ts",
     "marketMaker": "tsx src/strategies/marketMaker/index.ts",
+    "orchestrate": "tsx src/scripts/orchestrate.ts",
     "checkRewards": "tsx src/scripts/checkRewards.ts"
   },
   "devDependencies": {

@@ -832,3 +832,187 @@ export async function checkAllOrdersRewardEligibility(
 
   return results;
 }
+
+/**
+ * Parameters for calculating actual earnings from placed orders.
+ */
+export interface CalculateActualEarningsParams {
+  /** Condition ID for the market */
+  conditionId: string;
+  /** Primary token ID (YES token) for orderbook fetching */
+  tokenId: string;
+  /** Current market midpoint (0-1) */
+  midpoint: number;
+  /** Maximum spread for rewards in cents */
+  maxSpreadCents: number;
+  /** Minimum order size for rewards */
+  minSize: number;
+  /** Daily reward pool in USD */
+  ratePerDay: number;
+}
+
+/**
+ * Calculates actual earning rate from placed orders in a market.
+ *
+ * This uses the same logic as `npm run checkRewards` but for a single market.
+ * Returns actual earnings based on:
+ * 1. Your placed orders and their Q scores
+ * 2. Total market competition from orderbook
+ * 3. Market's daily reward pool
+ *
+ * @param client - Authenticated CLOB client
+ * @param params - Market parameters for calculation
+ * @returns Actual earnings result with Q scores and daily earnings
+ *
+ * @example
+ * ```typescript
+ * const earnings = await calculateActualEarnings(client, {
+ *   conditionId: "0x123...",
+ *   tokenId: "12345...",
+ *   midpoint: 0.55,
+ *   maxSpreadCents: 4.5,
+ *   minSize: 20,
+ *   ratePerDay: 100,
+ * });
+ *
+ * if (earnings.hasOrders) {
+ *   console.log(`Earning ${earnings.earningPct.toFixed(1)}% → $${earnings.actualDailyEarnings.toFixed(2)}/day`);
+ * }
+ * ```
+ */
+export async function calculateActualEarnings(
+  client: ClobClient,
+  params: CalculateActualEarningsParams
+): Promise<import("@/types/rewards.js").ActualEarningsResult> {
+  const {
+    conditionId,
+    tokenId,
+    midpoint,
+    maxSpreadCents,
+    minSize,
+    ratePerDay,
+  } = params;
+
+  // Fetch open orders for this market
+  const allOrders = (await client.getOpenOrders()) as OpenOrder[];
+
+  // Filter orders for this market's tokens
+  // We need to check both YES and NO tokens, but we only have the YES tokenId
+  // Fetch orderbook to get the conditionId mapping
+  const orderBook = await client.getOrderBook(tokenId);
+
+  // Filter orders by matching conditionId via orderbook lookup
+  // For efficiency, we filter by checking if the order's conditionId matches
+  const marketOrders: OpenOrder[] = [];
+  const seenTokens = new Set<string>();
+
+  for (const order of allOrders) {
+    // Check each unique token's conditionId
+    if (!seenTokens.has(order.asset_id)) {
+      seenTokens.add(order.asset_id);
+      const ob = await client.getOrderBook(order.asset_id);
+      if (ob.market === conditionId) {
+        // This token belongs to our market, include all orders for it
+        for (const o of allOrders) {
+          if (o.asset_id === order.asset_id) {
+            marketOrders.push(o);
+          }
+        }
+      }
+    }
+  }
+
+  // If no orders, return empty result
+  if (marketOrders.length === 0) {
+    return {
+      hasOrders: false,
+      orderCount: 0,
+      ourQScore: 0,
+      totalQScore: 0,
+      earningPct: 0,
+      actualDailyEarnings: 0,
+      ratePerDay,
+    };
+  }
+
+  // Calculate our Q score from actual orders
+  let qOne = 0; // Bid side (YES BUYs + NO SELLs)
+  let qTwo = 0; // Ask side (YES SELLs + NO BUYs)
+
+  for (const order of marketOrders) {
+    const price = parseFloat(order.price);
+    const size = parseFloat(order.original_size) - parseFloat(order.size_matched);
+
+    // Skip orders below minimum size
+    if (size < minSize) continue;
+
+    // Calculate spread and score
+    // For NO token orders, we need the NO midpoint (1 - yesMidpoint)
+    const isYesToken = order.asset_id === tokenId;
+    const orderMidpoint = isYesToken ? midpoint : 1 - midpoint;
+    const spreadCents = calculateSpreadCents(price, orderMidpoint);
+
+    // Skip orders outside max spread
+    if (spreadCents >= maxSpreadCents) continue;
+
+    const score = calculateRewardScore(spreadCents, maxSpreadCents, size);
+
+    // Map to Q_one or Q_two based on token and side
+    const isQOneSide =
+      (isYesToken && order.side === "BUY") ||
+      (!isYesToken && order.side === "SELL");
+
+    if (isQOneSide) {
+      qOne += score;
+    } else {
+      qTwo += score;
+    }
+  }
+
+  // Calculate our effective Q score
+  const ourQScore = calculateEffectiveScore(qOne, qTwo, midpoint);
+
+  // Calculate total Q score from orderbook
+  const totalQScoreResult = calculateTotalQScore(
+    orderBook.bids,
+    orderBook.asks,
+    midpoint,
+    maxSpreadCents,
+    minSize
+  );
+
+  // Use effective total Q_min considering two-sided requirements
+  const twoSidedRequired = isTwoSidedRequired(midpoint);
+  let totalQScore: number;
+
+  if (twoSidedRequired) {
+    // Strict two-sided: use min
+    totalQScore = totalQScoreResult.totalQMin;
+  } else {
+    // Single-sided allowed with penalty
+    totalQScore = Math.max(
+      totalQScoreResult.totalQMin,
+      Math.max(
+        totalQScoreResult.totalBidScore / DEFAULT_SCALING_FACTOR,
+        totalQScoreResult.totalAskScore / DEFAULT_SCALING_FACTOR
+      )
+    );
+  }
+
+  // Calculate earning percentage
+  const earningPct =
+    totalQScore > 0 ? calculateEarningPercentage(ourQScore, totalQScore) : 0;
+
+  // Calculate actual daily earnings
+  const actualDailyEarnings = (earningPct / 100) * ratePerDay;
+
+  return {
+    hasOrders: true,
+    orderCount: marketOrders.length,
+    ourQScore,
+    totalQScore,
+    earningPct,
+    actualDailyEarnings,
+    ratePerDay,
+  };
+}

@@ -240,3 +240,30 @@ export interface RankedMarketByEarnings extends MarketWithRewards {
   /** Calculated earning potential breakdown */
   earningPotential: EarningPotentialScore;
 }
+
+/**
+ * Result of calculating actual earnings from placed orders.
+ * Used by orchestrator to compare actual vs estimated earnings.
+ */
+export interface ActualEarningsResult {
+  /** Whether we have any open orders in this market */
+  hasOrders: boolean;
+
+  /** Number of open orders found */
+  orderCount: number;
+
+  /** Our Q score from actual placed orders */
+  ourQScore: number;
+
+  /** Total Q score in the market (from orderbook) */
+  totalQScore: number;
+
+  /** Our earning percentage (0-100) */
+  earningPct: number;
+
+  /** Actual daily earnings in USD */
+  actualDailyEarnings: number;
+
+  /** The market's daily reward pool */
+  ratePerDay: number;
+}

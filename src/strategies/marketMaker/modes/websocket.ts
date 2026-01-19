@@ -1,5 +1,10 @@
 /**
  * Market Maker WebSocket Mode - Real-time price updates with fallback polling.
+ *
+ * Supports orchestrator integration via:
+ * - `onNeutralPosition`: Callback when neutral position detected (for logging)
+ * - `onCheckPendingSwitch`: Callback after fills to check if should exit (returns true to stop)
+ * - Returns `MarketMakerResult` with exit reason and final state
  */
 
 import { log } from "@/utils/helpers.js";
@@ -13,23 +18,36 @@ import { shouldRebalance } from "../quoter.js";
 import { placeQuotes, cancelExistingOrders } from "../executor.js";
 import { createInitialState, createShutdownHandler, registerShutdownHandlers, createPositionTracker, checkAndMergeNeutralPosition } from "../lifecycle.js";
 import type { ClobClient } from "@polymarket/clob-client";
-import type { MarketMakerConfig, MarketMakerState } from "../types.js";
+import type { MarketMakerConfig, MarketMakerState, MarketMakerResult, OrchestratableMarketMakerConfig } from "../types.js";
 import type { PositionTracker } from "@/utils/positionTracker.js";
 
 export interface WebSocketRunnerContext {
-  config: MarketMakerConfig;
+  config: MarketMakerConfig | OrchestratableMarketMakerConfig;
   client: ClobClient;
 }
 
 /**
  * Runs the market maker with WebSocket real-time updates.
  * Falls back to polling when WebSocket is disconnected.
+ *
+ * @returns MarketMakerResult with exit reason and final state
  */
-export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<void> {
+export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<MarketMakerResult> {
   const { config, client } = ctx;
+
+  // Extract orchestrator options (with defaults for backward compatibility)
+  const onNeutralPosition = (config as OrchestratableMarketMakerConfig).onNeutralPosition;
+  const onCheckPendingSwitch = (config as OrchestratableMarketMakerConfig).onCheckPendingSwitch;
 
   // Initialize state
   const state: MarketMakerState = createInitialState();
+
+  // Track exit reason for return value
+  let exitReason: MarketMakerResult["reason"] = "shutdown";
+  let exitError: Error | undefined;
+
+  // Resolver for the main loop promise (used for pending switch exit)
+  let resolveMainLoop: (() => void) | null = null;
 
   // Lock to prevent concurrent rebalances
   let isRebalancing = false;
@@ -61,15 +79,46 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<voi
   let userWs: UserWebSocket | null = null;
 
   /**
+   * Checks if orchestrator has a pending switch and we're neutral.
+   * If so, signals the market maker to stop.
+   */
+  const checkPendingSwitchAndMaybeExit = (): void => {
+    if (!positionTracker || !onCheckPendingSwitch) return;
+    
+    const position = positionTracker.getPositionState();
+    const shouldStop = onCheckPendingSwitch({
+      yesTokens: position.yesTokens,
+      noTokens: position.noTokens,
+      netExposure: position.netExposure,
+      neutralPosition: position.neutralPosition,
+    });
+    
+    if (shouldStop) {
+      log("");
+      log("╔════════════════════════════════════════════════════════════════╗");
+      log("║  PENDING SWITCH READY - Position is neutral, stopping...       ║");
+      log("╚════════════════════════════════════════════════════════════════╝");
+      log(`  YES: ${position.yesTokens.toFixed(2)}, NO: ${position.noTokens.toFixed(2)}`);
+      
+      exitReason = "neutral";
+      state.running = false;
+      if (resolveMainLoop) {
+        resolveMainLoop();
+      }
+    }
+  };
+
+  /**
    * Executes a rebalance cycle.
    * @param midpoint - Current market midpoint
    * @param source - Source of the rebalance trigger (for logging)
    * @param force - Force rebalance even if midpoint hasn't moved (e.g., position limit change)
+   * @returns true if should continue, false if should exit
    */
-  const executeRebalance = async (midpoint: number, source: string, force: boolean = false): Promise<void> => {
+  const executeRebalance = async (midpoint: number, source: string, force: boolean = false): Promise<boolean> => {
     // Prevent concurrent rebalances
     if (isRebalancing) {
-      return;
+      return true;
     }
     isRebalancing = true;
 
@@ -84,6 +133,19 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<voi
         // Update session stats
         state.stats.mergeCount++;
         state.stats.totalMerged += mergeResult.amount;
+      }
+
+      // === Notify orchestrator of neutral position (for logging) ===
+      if (positionTracker && onNeutralPosition) {
+        const position = positionTracker.getPositionState();
+        if (position.neutralPosition > 0 && position.netExposure === 0) {
+          onNeutralPosition({
+            yesTokens: position.yesTokens,
+            noTokens: position.noTokens,
+            netExposure: position.netExposure,
+            neutralPosition: position.neutralPosition,
+          });
+        }
       }
       
       // Build rebalance log line with P&L if position tracking is enabled
@@ -133,10 +195,12 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<voi
           : "none";
         log(`  Quotes still valid (YES: ${yesInfo}, NO: ${noInfo})`);
       }
+      return true; // Continue running
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       log(`  ERROR: ${errorMsg}`);
       state.lastError = errorMsg;
+      return true; // Continue despite error
     } finally {
       isRebalancing = false;
     }
@@ -273,7 +337,7 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<voi
                 limitStatusBefore.isLimitReached !== limitStatusAfter.isLimitReached ||
                 limitStatusBefore.blockedSide !== limitStatusAfter.blockedSide;
               
-              if (limitChanged) {
+                if (limitChanged) {
                 log("  Position limit status changed, triggering rebalance...");
                 
                 // Get current midpoint for rebalance
@@ -294,6 +358,10 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<voi
                     });
                 }
               }
+              
+              // Check if orchestrator wants to switch (after each fill)
+              // This allows the orchestrator to exit when: pendingSwitch exists AND neutral
+              checkPendingSwitchAndMaybeExit();
             }
           }
         },
@@ -336,6 +404,7 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<voi
   // Keep the process running
   // The event loop is kept alive by WebSocket and timers
   await new Promise<void>((resolve) => {
+    resolveMainLoop = resolve;
     const checkInterval = setInterval(() => {
       if (!state.running) {
         clearInterval(checkInterval);
@@ -343,4 +412,16 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<voi
       }
     }, 1000);
   });
+
+  // Build and return result
+  const finalPosition = positionTracker
+    ? positionTracker.getPositionState()
+    : undefined;
+
+  return {
+    reason: exitReason,
+    finalPosition,
+    error: exitError,
+    stats: state.stats,
+  };
 }

@@ -1,5 +1,10 @@
 /**
  * Market Maker Polling Mode - Traditional REST API polling.
+ *
+ * Supports orchestrator integration via:
+ * - `onNeutralPosition`: Callback when neutral position detected (for logging)
+ * - `onCheckPendingSwitch`: Callback after position changes to check if should exit (returns true to stop)
+ * - Returns `MarketMakerResult` with exit reason and final state
  */
 
 import { sleep, log } from "@/utils/helpers.js";
@@ -10,22 +15,32 @@ import { shouldRebalance } from "../quoter.js";
 import { placeQuotes, cancelExistingOrders } from "../executor.js";
 import { createInitialState, createShutdownHandler, registerShutdownHandlers, createPositionTracker, checkAndMergeNeutralPosition } from "../lifecycle.js";
 import type { ClobClient } from "@polymarket/clob-client";
-import type { MarketMakerConfig } from "../types.js";
+import type { MarketMakerConfig, MarketMakerResult, OrchestratableMarketMakerConfig } from "../types.js";
 import type { PositionTracker } from "@/utils/positionTracker.js";
 
 export interface PollingRunnerContext {
-  config: MarketMakerConfig;
+  config: MarketMakerConfig | OrchestratableMarketMakerConfig;
   client: ClobClient;
 }
 
 /**
  * Runs the market maker with traditional polling (no WebSocket).
+ *
+ * @returns MarketMakerResult with exit reason and final state
  */
-export async function runWithPolling(ctx: PollingRunnerContext): Promise<void> {
+export async function runWithPolling(ctx: PollingRunnerContext): Promise<MarketMakerResult> {
   const { config, client } = ctx;
+
+  // Extract orchestrator options (with defaults for backward compatibility)
+  const onNeutralPosition = (config as OrchestratableMarketMakerConfig).onNeutralPosition;
+  const onCheckPendingSwitch = (config as OrchestratableMarketMakerConfig).onCheckPendingSwitch;
 
   // Initialize state
   const state = createInitialState();
+
+  // Track exit reason for return value
+  let exitReason: MarketMakerResult["reason"] = "shutdown";
+  let exitError: Error | undefined;
 
   // Initialize position tracker for position limits
   const positionTracker: PositionTracker | null = await createPositionTracker(client, config);
@@ -47,6 +62,35 @@ export async function runWithPolling(ctx: PollingRunnerContext): Promise<void> {
     }
   }
 
+  /**
+   * Checks if orchestrator has a pending switch and we're neutral.
+   * If so, signals the market maker to stop.
+   */
+  const checkPendingSwitchAndMaybeExit = (): boolean => {
+    if (!positionTracker || !onCheckPendingSwitch) return false;
+    
+    const position = positionTracker.getPositionState();
+    const shouldStop = onCheckPendingSwitch({
+      yesTokens: position.yesTokens,
+      noTokens: position.noTokens,
+      netExposure: position.netExposure,
+      neutralPosition: position.neutralPosition,
+    });
+    
+    if (shouldStop) {
+      log("");
+      log("╔════════════════════════════════════════════════════════════════╗");
+      log("║  PENDING SWITCH READY - Position is neutral, stopping...       ║");
+      log("╚════════════════════════════════════════════════════════════════╝");
+      log(`  YES: ${position.yesTokens.toFixed(2)}, NO: ${position.noTokens.toFixed(2)}`);
+      
+      exitReason = "neutral";
+      state.running = false;
+      return true;
+    }
+    return false;
+  };
+
   // Create and register shutdown handler
   const shutdown = createShutdownHandler(state, client, config);
   registerShutdownHandlers(shutdown);
@@ -66,7 +110,26 @@ export async function runWithPolling(ctx: PollingRunnerContext): Promise<void> {
         state.stats.totalMerged += mergeResult.amount;
       }
 
-      // 2. Get current midpoint
+      // 2. Notify orchestrator of neutral position (for logging)
+      if (positionTracker && onNeutralPosition) {
+        const position = positionTracker.getPositionState();
+        // Neutral = has tokens AND no directional exposure
+        if (position.neutralPosition > 0 && position.netExposure === 0) {
+          onNeutralPosition({
+            yesTokens: position.yesTokens,
+            noTokens: position.noTokens,
+            netExposure: position.netExposure,
+            neutralPosition: position.neutralPosition,
+          });
+        }
+      }
+
+      // 3. Check if orchestrator wants to switch (after merge)
+      if (checkPendingSwitchAndMaybeExit()) {
+        break;
+      }
+
+      // 4. Get current midpoint
       const midpoint = await getMidpoint(client, config.market.yesTokenId);
       
       // Build log line with P&L if position tracking is enabled
@@ -76,7 +139,7 @@ export async function runWithPolling(ctx: PollingRunnerContext): Promise<void> {
       }
       log(logLine);
 
-      // 3. Check if we need to rebalance
+      // 5. Check if we need to rebalance
       const hasQuotes = state.activeQuotes.yesQuote !== null || state.activeQuotes.noQuote !== null;
       const needsRebalance =
         mergeResult.merged || // Force rebalance after merge
@@ -91,13 +154,13 @@ export async function runWithPolling(ctx: PollingRunnerContext): Promise<void> {
             : "Midpoint moved";
         log(`  ${reason}, rebalancing...`);
 
-        // 4. Cancel existing orders
+        // 6. Cancel existing orders
         if (hasQuotes) {
           await cancelExistingOrders(client, config);
           state.stats.ordersCancelled += 2; // YES + NO orders
         }
 
-        // 5. Place new quotes
+        // 7. Place new quotes
         state.activeQuotes = await placeQuotes(client, config, midpoint, positionTracker);
         state.stats.rebalanceCount++;
         // Count orders placed (1 for each non-null quote)
@@ -119,7 +182,19 @@ export async function runWithPolling(ctx: PollingRunnerContext): Promise<void> {
       state.lastError = errorMsg;
     }
 
-    // 6. Wait for next cycle
+    // 8. Wait for next cycle
     await sleep(config.refreshIntervalMs);
   }
+
+  // Build and return result
+  const finalPosition = positionTracker
+    ? positionTracker.getPositionState()
+    : undefined;
+
+  return {
+    reason: exitReason,
+    finalPosition,
+    error: exitError,
+    stats: state.stats,
+  };
 }

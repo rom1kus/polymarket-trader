@@ -63,6 +63,29 @@ export function log(message: string): void {
 }
 
 /**
+ * Formats a duration in milliseconds to a human-readable string.
+ *
+ * @param ms - Duration in milliseconds
+ * @returns Formatted string like "2h 30m 15s" or "45m 12s"
+ *
+ * @example
+ * formatDuration(3661000); // "1h 1m 1s"
+ * formatDuration(45000);   // "45s"
+ */
+export function formatDuration(ms: number): string {
+  const seconds = Math.floor(ms / 1000) % 60;
+  const minutes = Math.floor(ms / (1000 * 60)) % 60;
+  const hours = Math.floor(ms / (1000 * 60 * 60));
+
+  const parts: string[] = [];
+  if (hours > 0) parts.push(`${hours}h`);
+  if (minutes > 0) parts.push(`${minutes}m`);
+  if (seconds > 0 || parts.length === 0) parts.push(`${seconds}s`);
+
+  return parts.join(" ");
+}
+
+/**
  * Prompts the user for input from stdin.
  *
  * @param question - The prompt to display

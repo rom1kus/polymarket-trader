@@ -119,11 +119,12 @@ Types for reward eligibility checking and market ranking:
 - `EarningPotentialScore` - Score breakdown based on estimated daily earnings
 - `RankedMarket` - Market with calculated attractiveness score (deprecated)
 - `RankedMarketByEarnings` - Market with calculated earning potential score
+- `ActualEarningsResult` - Result of calculating actual earnings from placed orders
 
 #### `src/types/strategy.ts`
 Shared types for trading strategies:
 - `StrategyConfig` - Base configuration for any strategy
-- `MarketParams` - Market parameters required for trading (yesTokenId, noTokenId, conditionId, tickSize, negRisk, etc.)
+- `MarketParams` - Market parameters required for trading (yesTokenId, noTokenId, conditionId, tickSize, negRisk, rewardsDaily, etc.)
 
 #### `src/types/inventory.ts`
 Types for inventory management and pre-flight checks:
@@ -306,6 +307,7 @@ Reward calculation and eligibility checking:
 - `calculateEarningPercentage(yourQMin, totalQMin)` - Calculates earning percentage
 - `estimateDailyEarnings(rewardsDaily, competition, liquidity, spread, maxSpread)` - Estimates daily earnings for a given liquidity
 - `calculateEarningPotential(rewardsDaily, competition, maxSpread, minSize, liquidity)` - Calculates earning potential score for ranking
+- `calculateActualEarnings(client, params)` - Calculates actual earnings from placed orders
 - `getMarketRewardParamsWithMidpoint(client, tokenId)` - Fetches params with midpoint
 - `evaluateOrderReward(order, params)` - Evaluates single order reward status
 - `checkOrdersRewardEligibility(orders, params)` - Checks orders for a token
@@ -332,6 +334,27 @@ Common helper utilities:
 - `log(message)` - Simple timestamped logger
 - `promptForInput(question)` - Prompts user for text input from stdin
 - `promptForNumber(question, min, max)` - Prompts for validated numeric input
+
+- `formatDuration(ms)` - Formats duration in milliseconds to human-readable (e.g., "2h 30m 15s")
+
+#### `src/utils/marketDiscovery.ts`
+Market discovery utilities for finding and ranking markets by earning potential:
+- `discoverMarkets(options?)` - Main discovery function, fetches and ranks markets
+- `findBestMarket(liquidity, options?)` - Convenience function to get single best market
+- `rankMarketsByEarnings(markets, liquidity)` - Ranks markets by estimated daily earnings
+- `fetchRealCompetition(markets, options?)` - Fetches real Q scores from orderbooks
+- `getFirstTokenId(market)` - Extracts first token ID from clobTokenIds field
+
+**Used by:** `findBestMarkets.ts` script and orchestrator
+
+#### `src/utils/marketConfigGenerator.ts`
+Utility to generate MarketParams from discovered markets:
+- `generateMarketConfig(market, options?)` - Creates MarketParams from RankedMarketByEarnings
+- `parseClobTokenIds(clobTokenIds)` - Parses token IDs from JSON array or comma-separated string
+- `validateMarketParams(params)` - Validates all required fields
+- `formatMarketConfig(params, question?)` - Human-readable config summary
+
+**Used by:** Orchestrator to create market maker configs programmatically
 
 #### `src/utils/websocket.ts`
 Polymarket WebSocket manager for real-time market data:
@@ -525,11 +548,78 @@ Finds the highest-earning markets for liquidity rewards:
 - Supports `--json`, `--details`, `--limit`, `--max-size`, `--liquidity` options
 - Usage: `npm run findBestMarkets` or `npm run findBestMarkets -- --liquidity 500`
 
+#### `src/scripts/orchestrate.ts`
+Entry point for the market maker orchestrator:
+- Thin wrapper that calls `main()` from `@/strategies/orchestrator/index.ts`
+- Parses CLI arguments for configuration
+- Usage: `npm run orchestrate` (see orchestrator section for full options)
+
 ### `src/strategies/`
 Directory for automated trading strategies. Each strategy should:
 - Have its own subdirectory with `index.ts`, `config.ts`, `types.ts`
 - Use shared utilities from `@/utils/*`
 - Have configurable parameters in `config.ts`
+
+#### `src/strategies/orchestrator/`
+Automatic market selection and switching orchestrator.
+
+**Purpose:** Automatically maximizes liquidity rewards by:
+1. Finding the best market based on earning potential
+2. Running the market maker continuously
+3. Periodically re-evaluating markets (every N minutes)
+4. When a better market is found, setting a "pending switch"
+5. When position becomes neutral AND pending switch exists, executing the switch
+
+**Files:**
+- `index.ts` - Main orchestrator loop and CLI entry point
+- `config.ts` - Orchestrator configuration (`OrchestratorConfig`, defaults, CLI parsing)
+- `types.ts` - Orchestrator types (`OrchestratorState`, `PendingSwitch`, `SwitchDecision`, events)
+
+**Key Features:**
+- Uses `findBestMarket()` from `@/utils/marketDiscovery.ts`
+- Uses `generateMarketConfig()` from `@/utils/marketConfigGenerator.ts`
+- **Actual earnings comparison**: Uses `calculateActualEarnings()` to compare real performance vs estimated potential
+- **Periodic re-evaluation** with configurable interval (default 5 minutes)
+- **Pending switch pattern**: Better market sets flag, switch executes when neutral
+- Configurable switching threshold (default 20% improvement required)
+- Log-only mode for safe testing (default: no real switching)
+- Session summary with cumulative stats on shutdown
+
+**Switching Logic:**
+- Uses **actual earnings** from placed orders when available (not just estimates)
+- Falls back to estimated earnings if no orders are placed
+- Compares actual current vs estimated candidate (conservative approach)
+- Neutral position ENABLES switching but doesn't TRIGGER it
+- Finding a better market TRIGGERS the pending switch flag
+- Switch executes only when BOTH: pending switch exists AND position is neutral
+
+**Usage:**
+```bash
+npm run orchestrate                          # Dry run, log switching decisions
+npm run orchestrate -- --liquidity 200       # Custom liquidity amount
+npm run orchestrate -- --threshold 0.15      # 15% improvement threshold
+npm run orchestrate -- --re-evaluate-interval 10  # Check every 10 minutes
+npm run orchestrate -- --enable-switching    # Enable market switching (still dry run)
+npm run orchestrate -- --enable-switching --no-dry-run  # Full live mode
+```
+
+**Flow Diagram:**
+```
+STARTUP → find best market → MARKET_MAKING
+                                   │
+              ┌────────────────────┴────────────────────┐
+              │                                         │
+        [periodic timer]                           [fills occur]
+              │                                         │
+        re-evaluate markets                    check onCheckPendingSwitch
+              │                                         │
+        if better market:                     if pendingSwitch && neutral:
+        set pendingSwitch                            SWITCH
+              │                                         │
+              └────────────────────┬────────────────────┘
+                                   │
+                              MARKET_MAKING (or new market)
+```
 
 #### `src/strategies/marketMaker/`
 Market maker bot for earning Polymarket liquidity rewards.
@@ -617,6 +707,8 @@ npm run findBestMarkets -- --details 1                # Show details for top mar
 
 # Trading strategies
 npm run marketMaker                                   # Run market maker bot (configure first!)
+npm run orchestrate                                   # Run orchestrator (auto market selection)
+npm run orchestrate -- --help                         # Show orchestrator options
 ```
 
 ## APIs Used
@@ -694,4 +786,4 @@ The Safe SDK (`@safe-global/protocol-kit`) handles:
 - All utilities in `src/utils/`
 
 ---
-*Last updated: 2026-01-19 - Added session statistics tracking and shutdown summary (SessionStats, printSessionSummary, fill/merge/volume tracking)*
+*Last updated: 2026-01-19 - Added actual earnings calculation for orchestrator switching decisions*
