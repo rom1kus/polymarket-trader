@@ -4,6 +4,8 @@
  * General-purpose utilities used across the application.
  */
 
+import * as readline from "readline";
+
 /**
  * Sleeps for a given number of milliseconds.
  *
@@ -68,7 +70,6 @@ export function log(message: string): void {
  */
 export function promptForInput(question: string): Promise<string> {
   return new Promise((resolve) => {
-    const readline = require("readline");
     const rl = readline.createInterface({
       input: process.stdin,
       output: process.stdout,
