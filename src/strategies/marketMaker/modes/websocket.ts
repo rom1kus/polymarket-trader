@@ -249,7 +249,15 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<Mar
   // Create WebSocket manager
   const ws = new PolymarketWebSocket({
     tokenIds: [config.market.yesTokenId],
-    onMidpointUpdate: (_tokenId, midpoint, timestamp) => {
+    onMidpointUpdate: (tokenId, midpoint, timestamp) => {
+      // Sanity check: Only process updates for the YES token we subscribed to
+      // Note: Polymarket may send updates for both YES and NO tokens (mirrored orderbooks)
+      // but the WebSocket class should filter NO tokens automatically
+      if (tokenId !== config.market.yesTokenId) {
+        log(`  ⚠️ Unexpected midpoint update for token ${tokenId.slice(0, 10)}... (mid: ${midpoint.toFixed(4)})`);
+        return;
+      }
+      
       // Update debounce with new midpoint
       debounce.update(midpoint, timestamp);
     },
@@ -394,6 +402,7 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<Mar
 
     // Do an initial rebalance using REST to get started immediately
     const initialMidpoint = await getMidpoint(client, config.market.yesTokenId);
+    log(`  Initial REST midpoint: ${initialMidpoint.toFixed(4)} (YES token: ${config.market.yesTokenId.slice(0, 10)}...)`);
     await executeRebalance(initialMidpoint, "initial REST");
 
   } catch (error) {
