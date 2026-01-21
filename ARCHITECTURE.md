@@ -277,6 +277,7 @@ Gamma API utilities for fetching event and market metadata:
   - Uses cursor-based pagination (`nextCursor`) to fetch all markets from API
   - Applies early filtering (liquidity compatibility, minSize) during fetch to reduce memory usage
   - Supports `onProgress` callback for progress reporting
+  - **NegRisk handling:** Reads `neg_risk` field from rewards API response (defaults to `false` if not present)
 - `fetchMarketRewardsInfo(conditionIds, fetcher?)` - Fetches market competitiveness and rate_per_day
 
 #### `src/utils/markets.ts`
@@ -345,6 +346,8 @@ Market discovery utilities for finding and ranking markets by earning potential:
 - `fetchRealCompetition(markets, options?)` - Fetches real Q scores from orderbooks
 - `getFirstTokenId(market)` - Extracts first token ID from clobTokenIds field
 
+**NegRisk Market Filtering:** NegRisk markets (multi-outcome markets) are automatically filtered out during ranking due to signature compatibility issues with the current implementation. This requires testing and fixing to support NegRisk markets.
+
 **Used by:** `findBestMarkets.ts` script and orchestrator
 
 #### `src/utils/marketConfigGenerator.ts`
@@ -380,6 +383,7 @@ Polymarket WebSocket manager for real-time market data:
 - Midpoint calculation: `(best_bid + best_ask) / 2`
 - Falls back to `last_trade_price` when spread > 10 cents
 - Supports `best_bid_ask`, `price_change`, `book`, `last_trade_price` events
+- **Token filtering:** Polymarket sends updates for both YES and NO tokens even when subscribing to only YES token; the WebSocket manager automatically filters out NO token updates to prevent confusion
 
 #### `src/utils/userWebsocket.ts`
 Authenticated WebSocket manager for user-specific events:
@@ -479,6 +483,8 @@ Position tracking for market making strategies with P&L economics:
   - `setInitialCostBasis(yesCost, noCost)` - Set cost basis for pre-existing tokens
   - `needsInitialCostBasis()` - Check if cost basis input is needed
 - `createPositionTracker(conditionId, yesTokenId, noTokenId, maxNetExposure)` - Factory function
+
+**Dust Balance Threshold:** The tracker uses a 0.1 token threshold to determine if cost basis is needed. Balances below 0.1 tokens are considered "dust" and ignored to prevent prompting for cost basis on negligible pre-existing positions.
 
 **Position Limits:**
 - Net exposure = yesTokens - noTokens
@@ -786,4 +792,4 @@ The Safe SDK (`@safe-global/protocol-kit`) handles:
 - All utilities in `src/utils/`
 
 ---
-*Last updated: 2026-01-19 - Added actual earnings calculation for orchestrator switching decisions*
+*Last updated: 2026-01-21 - Documented WebSocket token filtering, 0.1 dust threshold, and NegRisk market exclusion*

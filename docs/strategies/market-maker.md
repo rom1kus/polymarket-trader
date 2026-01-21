@@ -398,6 +398,9 @@ The bot tracks positions and enforces net exposure limits:
 - Blocks BUY YES when exposure >= maxNetExposure
 - Blocks BUY NO when exposure <= -maxNetExposure
 
+**Initial Position & Cost Basis:**
+When starting with pre-existing tokens (YES or NO), the bot needs your cost basis for accurate P&L tracking. The bot uses a **0.1 token threshold** - only positions with 0.1 or more tokens trigger the cost basis prompt. Balances below 0.1 (dust balances) are ignored to avoid prompting for negligible pre-existing positions.
+
 ### Auto-Merge Parameters
 
 The bot automatically merges neutral positions back to USDC:
