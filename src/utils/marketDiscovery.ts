@@ -130,7 +130,8 @@ export function rankMarketsByEarnings(
     .filter(
       (m) =>
         m.earningPotential.compatible &&
-        m.earningPotential.estimatedDailyEarnings > 0
+        m.earningPotential.estimatedDailyEarnings > 0 &&
+        !m.negRisk // Skip NegRisk markets due to signature compatibility issues
     )
     .sort(
       (a, b) =>
