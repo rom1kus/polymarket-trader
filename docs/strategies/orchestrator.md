@@ -161,6 +161,7 @@ Markets are filtered by:
 - Active reward program
 - Compatible with your liquidity amount (minSize)
 - Binary markets (YES/NO outcomes)
+- **NegRisk exclusion:** NegRisk markets (multi-outcome markets) are automatically excluded due to signature compatibility issues (requires testing and fixing)
 
 ## Session Summary
 

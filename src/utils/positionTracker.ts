@@ -128,7 +128,8 @@ export class PositionTracker {
       this.initialized = true;
 
       // If starting with existing tokens, flag that we need cost basis
-      const needsCostBasis = yesBalance > 0.001 || noBalance > 0.001;
+      // Use 0.1 threshold to ignore dust balances
+      const needsCostBasis = yesBalance > 0.1 || noBalance > 0.1;
 
       log(`[PositionTracker] Initialized fresh - YES: ${yesBalance.toFixed(2)}, NO: ${noBalance.toFixed(2)}`);
       if (needsCostBasis) {
@@ -232,8 +233,9 @@ export class PositionTracker {
     }
 
     // Check if we need cost basis for initial position
-    const initialHasTokens = (persisted.initialPosition?.yesTokens ?? 0) > 0.001 ||
-                             (persisted.initialPosition?.noTokens ?? 0) > 0.001;
+    // Use 0.1 threshold to ignore dust balances
+    const initialHasTokens = (persisted.initialPosition?.yesTokens ?? 0) > 0.1 ||
+                             (persisted.initialPosition?.noTokens ?? 0) > 0.1;
     const needsCostBasis = initialHasTokens && !this.initialCostBasis;
 
     if (needsCostBasis) {
@@ -560,7 +562,8 @@ export class PositionTracker {
   needsInitialCostBasis(): boolean {
     const initialYes = this.getInitialPositionTokens("YES");
     const initialNo = this.getInitialPositionTokens("NO");
-    const hasInitialPosition = initialYes > 0.001 || initialNo > 0.001;
+    // Use 0.1 threshold to ignore dust balances
+    const hasInitialPosition = initialYes > 0.1 || initialNo > 0.1;
     return hasInitialPosition && this.initialCostBasis === null;
   }
 

@@ -409,7 +409,13 @@ export class PolymarketWebSocket {
   private handleBestBidAsk(event: BestBidAskEvent): void {
     const tokenId = event.asset_id;
     const state = this.tokenState.get(tokenId);
-    if (!state) return;
+    
+    // Ignore events for tokens we're not tracking
+    // Note: Polymarket sends updates for both YES and NO tokens in a market
+    // even if you only subscribe to one. We filter here to avoid confusion.
+    if (!state) {
+      return;
+    }
 
     const bestBid = parseFloat(event.best_bid);
     const bestAsk = parseFloat(event.best_ask);

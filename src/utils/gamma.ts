@@ -225,6 +225,7 @@ interface RewardsMarketResponse {
   earning_percentage: number;
   spread: number;
   market_competitiveness: number;
+  neg_risk?: boolean;
 }
 
 /**
@@ -376,7 +377,7 @@ export async function fetchMarketsWithRewards(
         closed: false,
         acceptingOrders: true,
         enableOrderBook: true,
-        negRisk: undefined,
+        negRisk: m.neg_risk ?? false,
         liquidityNum: 0, // Not provided by rewards API
         volume24hr: m.volume_24hr ?? 0,
         rewardsMinSize: m.rewards_min_size ?? 0,
