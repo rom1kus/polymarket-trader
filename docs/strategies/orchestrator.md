@@ -6,12 +6,14 @@ Automatic market selection and switching to maximize liquidity rewards.
 
 The orchestrator automates the market maker workflow:
 
-1. **Find best market** - Ranks all eligible markets by earning potential
-2. **Run market maker** - Continuously provides liquidity
-3. **Periodic re-evaluation** - Checks for better markets every N minutes
-4. **Smart switching** - Only switches when position is neutral AND better market exists
+1. **Position detection on startup** - Scans for existing positions to prevent capital fragmentation
+2. **Resume or discover** - Prompts to resume existing market, or finds best new market
+3. **Run market maker** - Continuously provides liquidity
+4. **Periodic re-evaluation** - Checks for better markets every N minutes
+5. **Smart switching** - Only switches when position is neutral AND better market exists
 
-This eliminates manual market selection and enables 24/7 operation with automatic optimization.
+This eliminates manual market selection and enables 24/7 operation with automatic optimization,
+while preventing capital fragmentation across multiple markets when restarting.
 
 ## Quick Start
 
@@ -22,6 +24,12 @@ npm run orchestrate
 # With custom liquidity
 npm run orchestrate -- --liquidity 200
 
+# Check for existing positions only (diagnostics)
+npm run orchestrate -- --check-positions-only
+
+# Auto-resume mode for 24/7 operation
+npm run orchestrate -- --auto-resume
+
 # Adjust volatility filtering
 npm run orchestrate -- --max-volatility 0.15      # Allow 15% price changes
 npm run orchestrate -- --volatility-lookback 30   # 30-minute lookback
@@ -31,7 +39,7 @@ npm run orchestrate -- --no-volatility-filter     # Disable filter entirely
 npm run orchestrate -- --enable-switching
 
 # Full live mode (careful!)
-npm run orchestrate -- --enable-switching --no-dry-run
+npm run orchestrate -- --enable-switching --no-dry-run --auto-resume
 ```
 
 ## How It Works
@@ -41,34 +49,54 @@ npm run orchestrate -- --enable-switching --no-dry-run
 ```
 STARTUP
    │
-   │ findBestMarket()
+   │ detect existing positions
    ▼
-MARKET_MAKING ◄──────────────────────────────┐
-   │                                          │
-   ├─── [periodic timer] ─────┐               │
-   │    every N minutes       │               │
-   │                          ▼               │
-   │                   re-evaluate markets    │
-   │                          │               │
-   │                   if better market:      │
-   │                   set pendingSwitch      │
-   │                          │               │
-   ├─── [fills occur] ────────┤               │
-   │                          │               │
-   │    check onCheckPendingSwitch            │
-   │                          │               │
-   │    if pendingSwitch && neutral:          │
-   │                          │               │
-   ▼                          ▼               │
-SWITCHING ───────────────────────────────────►┘
-   │
-   │ switch to new market
-   │ clear pendingSwitch
-   │
-   └──► MARKET_MAKING (new market)
+┌──────────────────────────────┐
+│ Have non-neutral position?   │
+└──────────────────────────────┘
+   │              │
+   YES            NO
+   │              │
+   ▼              ▼
+PROMPT USER    FIND BEST MARKET
+(or auto)         │
+   │              │
+   └──────┬───────┘
+          ▼
+    MARKET_MAKING ◄──────────────────────────────┐
+       │                                          │
+       ├─── [periodic timer] ─────┐               │
+       │    every N minutes       │               │
+       │                          ▼               │
+       │                   re-evaluate markets    │
+       │                          │               │
+       │                   if better market:      │
+       │                   set pendingSwitch      │
+       │                          │               │
+       ├─── [fills occur] ────────┤               │
+       │                          │               │
+       │    check onCheckPendingSwitch            │
+       │                          │               │
+       │    if pendingSwitch && neutral:          │
+       │                          │               │
+       ▼                          ▼               │
+    SWITCHING ───────────────────────────────────►┘
+       │
+       │ switch to new market
+       │ clear pendingSwitch
+       │
+       └──► MARKET_MAKING (new market)
 ```
 
 ### Key Concepts
+
+**Restart Protection:**
+- On startup, the orchestrator scans all `./data/fills-*.json` files for existing positions
+- If a non-neutral position is found (net exposure > 0.1 tokens), it prompts to resume that market
+- This prevents capital fragmentation when restarting unexpectedly (crash, manual stop, etc.)
+- **Supervised mode** (default): Requires manual confirmation to resume
+- **24/7 mode** (`--auto-resume`): Automatically resumes without prompt
+- **Priority**: If multiple positions exist, resumes the one with largest net exposure
 
 **Pending Switch Pattern:**
 - Neutral position **enables** switching but doesn't **trigger** it
@@ -108,6 +136,9 @@ Example with 20% threshold:
 | `--max-volatility <n>` | 0.10 | Max price change % threshold (0.10 = 10%) |
 | `--volatility-lookback <n>` | 60 | Volatility lookback window in minutes |
 | `--no-volatility-filter` | - | Disable volatility filtering entirely |
+| `--auto-resume` | false | Auto-resume positions without prompting (24/7 mode) |
+| `--ignore-positions` | false | Force new discovery (dangerous, requires confirmation) |
+| `--check-positions-only` | false | Only check and report positions, don't start |
 | `--enable-switching` | false | Enable automatic market switching |
 | `--no-dry-run` | false | Place real orders |
 | `--dry-run` | true | Simulate orders (default) |
@@ -198,6 +229,8 @@ On shutdown, the orchestrator prints a summary:
 
 ## Example Session
 
+### Normal Startup (No Existing Position)
+
 ```
 ══════════════════════════════════════════════════════════════════════
   MARKET MAKER ORCHESTRATOR
@@ -220,13 +253,16 @@ On shutdown, the orchestrator prints a summary:
 [2026-01-19 10:00:01] [Orchestrator] Client initialized
 [2026-01-19 10:00:01] [Orchestrator] USDC balance: $500.00
 
-[2026-01-19 10:00:01] [Orchestrator] Finding best market...
-[2026-01-19 10:00:02] [Discovery] Fetch: 45/120 markets, 12 passed filters
-[2026-01-19 10:00:04] [Discovery] Using optimized volatility checking (top-first)
-[2026-01-19 10:00:04] [Discovery] Ranked 12 markets by earnings, checking volatility on top candidates...
-[2026-01-19 10:00:04]   ✅ "Will Bitcoin reach $100k by March 2026?" - 2.3% move (safe)
-[2026-01-19 10:00:04] [Discovery] Found safe market after checking 1 candidates (0 filtered)
-[2026-01-19 10:00:05] [Discovery] Competition: 12/12 orderbooks
+[2026-01-19 10:00:01] [Orchestrator] Checking for existing positions...
+[2026-01-19 10:00:02] [Orchestrator] No existing positions detected
+
+[2026-01-19 10:00:02] [Orchestrator] Finding best market...
+[2026-01-19 10:00:03] [Discovery] Fetch: 45/120 markets, 12 passed filters
+[2026-01-19 10:00:05] [Discovery] Using optimized volatility checking (top-first)
+[2026-01-19 10:00:05] [Discovery] Ranked 12 markets by earnings, checking volatility on top candidates...
+[2026-01-19 10:00:05]   ✅ "Will Bitcoin reach $100k by March 2026?" - 2.3% move (safe)
+[2026-01-19 10:00:05] [Discovery] Found safe market after checking 1 candidates (0 filtered)
+[2026-01-19 10:00:06] [Discovery] Competition: 12/12 orderbooks
 
 ──────────────────────────────────────────────────────────────────────
   SELECTED MARKET
@@ -238,12 +274,74 @@ On shutdown, the orchestrator prints a summary:
   Max Spread: 4 cents
 ──────────────────────────────────────────────────────────────────────
 
-[2026-01-19 10:00:05] [Orchestrator] Starting re-evaluation timer (every 5.0 min)
-
-[2026-01-19 10:00:05] [Orchestrator] Starting market maker for: Will Bitcoin reach $100k?
+[2026-01-19 10:00:06] [Orchestrator] Starting re-evaluation timer (every 5.0 min)
+[2026-01-19 10:00:06] [Orchestrator] Starting market maker for: Will Bitcoin reach $100k?
 
 ... market maker running ...
+```
 
+### Restart with Existing Position (Supervised Mode)
+
+```
+[2026-01-19 10:15:00] [Orchestrator] Initializing client...
+[2026-01-19 10:15:01] [Orchestrator] Client initialized
+[2026-01-19 10:15:01] [Orchestrator] USDC balance: $500.00
+
+[2026-01-19 10:15:01] [Orchestrator] Checking for existing positions...
+[2026-01-19 10:15:02] [Position Detection] Scanning 1 market(s) for positions...
+[2026-01-19 10:15:02] [Position Detection] Found position in 0xabc123...: YES=35.50, NO=18.20, net=+17.30
+
+══════════════════════════════════════════════════════════════════════
+  EXISTING POSITION DETECTED
+══════════════════════════════════════════════════════════════════════
+
+The orchestrator found a non-neutral position from a previous session:
+
+  Condition ID: 0xabc123...
+  Position:     YES=35.50, NO=18.20
+  Net Exposure: +17.30 YES
+  Market:       Will Bitcoin reach $100k by March 2026?
+
+To avoid fragmenting your capital across multiple markets, the
+orchestrator should resume this market until the position is neutral.
+
+══════════════════════════════════════════════════════════════════════
+
+Resume this market? (yes/no): yes
+
+[2026-01-19 10:15:10] [Orchestrator] Resuming market: 0xabc123...
+[2026-01-19 10:15:11] [Orchestrator] Loading market data for 0xabc123...
+[2026-01-19 10:15:12] [Orchestrator] Successfully loaded market config
+[2026-01-19 10:15:12] [Orchestrator] Resumed: Will Bitcoin reach $100k by March 2026?
+[2026-01-19 10:15:12] [Orchestrator] Starting market maker for: Will Bitcoin reach $100k?
+
+... market maker continues where it left off ...
+```
+
+### Restart with Auto-Resume (24/7 Mode)
+
+```
+[2026-01-19 10:20:00] [Orchestrator] Initializing client...
+[2026-01-19 10:20:01] [Orchestrator] Client initialized
+[2026-01-19 10:20:01] [Orchestrator] USDC balance: $500.00
+
+[2026-01-19 10:20:01] [Orchestrator] Checking for existing positions...
+[2026-01-19 10:20:02] [Position Detection] Scanning 1 market(s) for positions...
+[2026-01-19 10:20:02] [Position Detection] Found position in 0xabc123...: YES=35.50, NO=18.20, net=+17.30
+[2026-01-19 10:20:02] [Orchestrator] Found position in 0xabc123...
+[2026-01-19 10:20:02] [Orchestrator] Auto-resuming (--auto-resume enabled)
+[2026-01-19 10:20:02] [Orchestrator] Resuming market: 0xabc123...
+[2026-01-19 10:20:03] [Orchestrator] Loading market data for 0xabc123...
+[2026-01-19 10:20:04] [Orchestrator] Successfully loaded market config
+[2026-01-19 10:20:04] [Orchestrator] Resumed: Will Bitcoin reach $100k by March 2026?
+[2026-01-19 10:20:04] [Orchestrator] Starting market maker for: Will Bitcoin reach $100k?
+
+... market maker continues automatically ...
+```
+
+### Active Session (Market Evaluation & Switching)
+
+```
 [2026-01-19 10:05:05] [Orchestrator] Periodic re-evaluation...
 [2026-01-19 10:05:08] [Orchestrator] Current market is still optimal
 
@@ -275,6 +373,39 @@ On shutdown, the orchestrator prints a summary:
 ```
 
 ## Troubleshooting
+
+### Restart Scenarios
+
+**"Existing position detected" prompt on startup**
+
+The orchestrator found a non-neutral position from a previous session. This is **normal and safe**.
+
+Options:
+- Type `yes` to resume the same market (recommended to avoid fragmenting capital)
+- Type `no` to start a new market (may fragment capital across markets)
+- Use `--auto-resume` flag to skip prompt in 24/7 mode
+
+**Want to check positions without starting?**
+
+```bash
+npm run orchestrate -- --check-positions-only
+```
+
+This scans for positions and reports them without starting the orchestrator.
+
+**Need to force a new market despite existing position?**
+
+```bash
+npm run orchestrate -- --ignore-positions
+```
+
+⚠️ **WARNING:** This will prompt for confirmation with the exact phrase `yes-ignore-positions`.
+Only use this if you understand the risk of capital fragmentation.
+
+**Lost track of which markets you're in?**
+
+Check the `./data/` directory for `fills-*.json` files. Each file corresponds to a market
+where you have (or had) positions. The filename contains the condition ID.
 
 ### "No eligible markets found"
 

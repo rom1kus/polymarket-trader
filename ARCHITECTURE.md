@@ -17,7 +17,8 @@ polymarket-trader/
 ├── docs/
 │   └── strategies/
 │       ├── market-maker.md         # Market maker strategy documentation
-│       └── market-maker-roadmap.md # Market maker future enhancements
+│       ├── market-maker-roadmap.md # Market maker future enhancements
+│       └── orchestrator.md         # Orchestrator documentation (auto market selection)
 ├── data/                 # Trading history data (auto-generated)
 │   └── fills-*.json      # Position tracking and fill history per market
 ├── src/
@@ -471,6 +472,26 @@ Order ID tracking for correct fill attribution:
 This is **essential** for correct fill attribution - we use the tracked `side` to know what we actually
 did (bought or sold), rather than incorrectly inferring from the taker's perspective.
 
+#### `src/utils/orchestratorState.ts`
+Orchestrator state management for detecting existing positions on restart:
+- `DetectedPosition` - Interface for detected market positions (conditionId, balances, net exposure)
+- `detectExistingPositions(client)` - Scans all markets for non-neutral positions
+- `findPriorityMarket(positions)` - Finds market with largest exposure (most urgent to resume)
+- `formatDetectedPosition(position)` - Formats position for display
+- `printPositionsSummary(positions)` - Prints summary of all detected positions
+
+**Purpose:** Prevents capital fragmentation on orchestrator restart. When restarting, the orchestrator
+scans for existing non-neutral positions and prompts to resume them (or auto-resumes with `--auto-resume`).
+This ensures you don't accidentally start trading a new market while stuck with positions in another.
+
+**Detection Process:**
+1. Scans all `./data/fills-*.json` files for known markets
+2. Verifies on-chain balances for ground truth
+3. Prioritizes market with largest net exposure
+4. Prompts user to resume (supervised) or auto-resumes (24/7 mode)
+
+**Dust Threshold:** Balances below 0.1 tokens are considered negligible and ignored.
+
 #### `src/utils/storage.ts`
 JSON file persistence for position tracking data:
 - `loadMarketState(conditionId)` - Loads persisted state from disk (handles v1→v2 migration)
@@ -601,21 +622,29 @@ Directory for automated trading strategies. Each strategy should:
 #### `src/strategies/orchestrator/`
 Automatic market selection and switching orchestrator.
 
+> **Full documentation:** [docs/strategies/orchestrator.md](docs/strategies/orchestrator.md)
+
 **Purpose:** Automatically maximizes liquidity rewards by:
-1. Finding the best market based on earning potential
-2. Running the market maker continuously
-3. Periodically re-evaluating markets (every N minutes)
-4. When a better market is found, setting a "pending switch"
-5. When position becomes neutral AND pending switch exists, executing the switch
+1. Detecting existing positions on startup to prevent capital fragmentation
+2. Finding the best market based on earning potential
+3. Running the market maker continuously
+4. Periodically re-evaluating markets (every N minutes)
+5. When a better market is found, setting a "pending switch"
+6. When position becomes neutral AND pending switch exists, executing the switch
 
 **Files:**
-- `index.ts` - Main orchestrator loop and CLI entry point
+- `index.ts` - Main orchestrator loop, CLI entry point, position resume logic
 - `config.ts` - Orchestrator configuration (`OrchestratorConfig`, defaults, CLI parsing)
 - `types.ts` - Orchestrator types (`OrchestratorState`, `PendingSwitch`, `SwitchDecision`, events)
 
 **Key Features:**
 - Uses `findBestMarket()` from `@/utils/marketDiscovery.ts`
 - Uses `generateMarketConfig()` from `@/utils/marketConfigGenerator.ts`
+- Uses `detectExistingPositions()` from `@/utils/orchestratorState.ts` for restart protection
+- **Restart protection**: On startup, scans for existing non-neutral positions and prompts to resume
+  - Supervised mode (default): Manual confirmation required to resume
+  - 24/7 mode (`--auto-resume`): Automatically resumes without prompt
+  - Prevents capital fragmentation across multiple markets
 - **Volatility filtering**: Filters out markets with excessive price movement (>10% in 60 min by default, conservative) to prevent adverse selection
   - Uses optimized top-first checking (only checks top-ranked candidates, not all markets)
   - Configurable via `--max-volatility` and `--volatility-lookback` flags
@@ -644,8 +673,28 @@ npm run orchestrate -- --re-evaluate-interval 10  # Check every 10 minutes
 npm run orchestrate -- --max-volatility 0.15      # 15% max price change threshold
 npm run orchestrate -- --volatility-lookback 60   # 60-minute lookback window (default)
 npm run orchestrate -- --no-volatility-filter     # Disable volatility filtering
-npm run orchestrate -- --enable-switching    # Enable market switching (still dry run)
+npm run orchestrate -- --check-positions-only     # Only check positions, don't start
+npm run orchestrate -- --auto-resume              # Enable auto-resume (24/7 mode)
+npm run orchestrate -- --enable-switching         # Enable market switching (still dry run)
 npm run orchestrate -- --enable-switching --no-dry-run  # Full live mode
+```
+
+**Flow Diagram:**
+```
+STARTUP → detect positions → prompt/auto-resume OR discover best market → MARKET_MAKING
+                                                                                │
+                                           ┌────────────────────┴────────────────────┐
+                                           │                                         │
+                                     [periodic timer]                           [fills occur]
+                                           │                                         │
+                                     re-evaluate markets                    check onCheckPendingSwitch
+                                           │                                         │
+                                     if better market:                     if pendingSwitch && neutral:
+                                     set pendingSwitch                            SWITCH
+                                           │                                         │
+                                           └────────────────────┬────────────────────┘
+                                                                │
+                                                         MARKET_MAKING (or new market)
 ```
 
 **Flow Diagram:**

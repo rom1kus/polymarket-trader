@@ -111,6 +111,33 @@ export interface OrchestratorConfig {
    */
   dryRun: boolean;
 
+  // =========================================================================
+  // Position Resume (Restart Protection)
+  // =========================================================================
+
+  /**
+   * Automatically resume existing positions on restart without prompting.
+   * When false (default), prompts user to confirm resuming detected positions.
+   * Set to true for fully automated 24/7 operation.
+   * @default false
+   */
+  autoResume: boolean;
+
+  /**
+   * Ignore existing positions and force new market discovery on startup.
+   * DANGEROUS: May fragment capital across multiple markets.
+   * Requires manual confirmation via prompt.
+   * @default false
+   */
+  ignorePositions: boolean;
+
+  /**
+   * Only check for positions and report, don't start orchestrator.
+   * Useful for diagnostics.
+   * @default false
+   */
+  checkPositionsOnly: boolean;
+
   /**
    * Event handler for orchestrator events (logging, monitoring).
    */
@@ -144,6 +171,11 @@ export const DEFAULT_ORCHESTRATOR_CONFIG: OrchestratorConfig = {
   // Features & safety (conservative defaults)
   enableSwitching: false, // Log only by default
   dryRun: true, // No real orders by default
+
+  // Position resume (conservative defaults)
+  autoResume: false, // Prompt user by default
+  ignorePositions: false, // Always check for positions
+  checkPositionsOnly: false, // Normal operation
 };
 
 /**
@@ -198,6 +230,9 @@ export function createOrchestratorConfig(
  * - --no-volatility-filter: Disable volatility filtering entirely
  * - --enable-switching: Enable actual market switching
  * - --no-dry-run: Disable dry run (place real orders)
+ * - --auto-resume: Automatically resume positions without prompting (for 24/7 mode)
+ * - --ignore-positions: Force new market discovery even with open positions (dangerous)
+ * - --check-positions-only: Only check and report positions, don't start
  *
  * @param args - Command-line arguments (typically process.argv.slice(2))
  * @returns Partial config with parsed values
@@ -276,6 +311,18 @@ export function parseOrchestratorArgs(args: string[]): Partial<OrchestratorConfi
 
       case "--dry-run":
         config.dryRun = true;
+        break;
+
+      case "--auto-resume":
+        config.autoResume = true;
+        break;
+
+      case "--ignore-positions":
+        config.ignorePositions = true;
+        break;
+
+      case "--check-positions-only":
+        config.checkPositionsOnly = true;
         break;
     }
   }

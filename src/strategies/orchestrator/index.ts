@@ -20,7 +20,7 @@
  */
 
 import { createAuthenticatedClobClient } from "@/utils/authClient.js";
-import { log, formatDuration } from "@/utils/helpers.js";
+import { log, formatDuration, promptForInput } from "@/utils/helpers.js";
 import { getUsdcBalance } from "@/utils/balance.js";
 import { findBestMarket, discoverMarkets, type RankedMarketByEarnings } from "@/utils/marketDiscovery.js";
 import { generateMarketConfig, formatMarketConfig } from "@/utils/marketConfigGenerator.js";
@@ -29,6 +29,12 @@ import { getMidpoint } from "@/utils/orders.js";
 import { createMarketMakerConfig } from "../marketMaker/config.js";
 import { validateConfig, printBanner } from "../marketMaker/lifecycle.js";
 import { runWithWebSocket } from "../marketMaker/modes/index.js";
+import {
+  detectExistingPositions,
+  findPriorityMarket,
+  printPositionsSummary,
+  type DetectedPosition,
+} from "@/utils/orchestratorState.js";
 import type { ClobClient } from "@polymarket/clob-client";
 import type { MarketMakerResult, OrchestratableMarketMakerConfig, SessionStats } from "../marketMaker/types.js";
 import type {
@@ -287,6 +293,119 @@ function printSessionSummary(state: OrchestratorState): void {
   console.log(`  Orders:         ${state.cumulativeStats.ordersPlaced} placed, ${state.cumulativeStats.ordersCancelled} cancelled`);
   console.log(SEPARATOR);
   console.log("");
+}
+
+// =============================================================================
+// Market Resume Logic
+// =============================================================================
+
+/**
+ * Attempts to create a market config from a detected position.
+ * Requires loading the full market data from discovery.
+ *
+ * @param position - Detected position to resume
+ * @param orchestratorConfig - Orchestrator configuration
+ * @param state - Orchestrator state
+ * @returns Market maker config, or null if market data unavailable
+ */
+async function createConfigFromPosition(
+  position: DetectedPosition,
+  orchestratorConfig: OrchestratorConfig,
+  state: OrchestratorState
+): Promise<OrchestratableMarketMakerConfig | null> {
+  try {
+    // We need to fetch the market's reward parameters to create proper config
+    // For now, we'll use discoverMarkets to find this specific market
+    log(`[Orchestrator] Loading market data for ${position.conditionId.substring(0, 18)}...`);
+
+    const result = await discoverMarkets({
+      maxMinSize: orchestratorConfig.orderSize,
+    });
+
+    const matchingMarket = result.markets.find((m) => m.conditionId === position.conditionId);
+
+    if (!matchingMarket) {
+      log(`[Orchestrator] Warning: Could not find market ${position.conditionId} in active rewards list`);
+      log(`[Orchestrator] Market may no longer have active rewards, or may have been delisted`);
+      return null;
+    }
+
+    // Create config using the discovered market
+    const config = createConfigForMarket(matchingMarket, orchestratorConfig, state);
+
+    return config;
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    log(`[Orchestrator] Error loading market data: ${msg}`);
+    return null;
+  }
+}
+
+/**
+ * Prompts user to confirm resuming a detected position.
+ *
+ * @param position - Position to resume
+ * @returns True if user confirms, false otherwise
+ */
+async function promptResumePosition(position: DetectedPosition): Promise<boolean> {
+  console.log("");
+  console.log("═".repeat(70));
+  console.log("  EXISTING POSITION DETECTED");
+  console.log("═".repeat(70));
+  console.log("");
+  console.log("The orchestrator found a non-neutral position from a previous session:");
+  console.log("");
+  console.log(`  Condition ID: ${position.conditionId.substring(0, 18)}...`);
+  console.log(`  Position:     YES=${position.yesBalance.toFixed(2)}, NO=${position.noBalance.toFixed(2)}`);
+  
+  const direction = position.netExposure >= 0 ? "YES" : "NO";
+  const exposure = position.netExposure >= 0 
+    ? `+${position.netExposure.toFixed(2)}` 
+    : position.netExposure.toFixed(2);
+  console.log(`  Net Exposure: ${exposure} ${direction}`);
+
+  if (position.marketQuestion) {
+    console.log(`  Market:       ${position.marketQuestion}`);
+  }
+
+  console.log("");
+  console.log("To avoid fragmenting your capital across multiple markets, the");
+  console.log("orchestrator should resume this market until the position is neutral.");
+  console.log("");
+  console.log("═".repeat(70));
+  console.log("");
+
+  const answer = await promptForInput(
+    "Resume this market? (yes/no): "
+  );
+
+  return answer.toLowerCase().trim() === "yes" || answer.toLowerCase().trim() === "y";
+}
+
+/**
+ * Prompts user to confirm ignoring positions (dangerous operation).
+ *
+ * @returns True if user confirms with exact phrase, false otherwise
+ */
+async function promptIgnorePositions(): Promise<boolean> {
+  console.log("");
+  console.log("⚠️  WARNING: You are about to ignore existing positions!");
+  console.log("");
+  console.log("This means the orchestrator will start on a NEW market while you");
+  console.log("still have open positions in the previous market. This will:");
+  console.log("");
+  console.log("  • Fragment your capital across multiple markets");
+  console.log("  • Require manual intervention to close old positions");
+  console.log("  • May result in losses if the old market moves against you");
+  console.log("");
+  console.log("This is generally NOT recommended unless you know what you're doing.");
+  console.log("");
+
+  const answer = await promptForInput(
+    'Type "yes-ignore-positions" to confirm: '
+  );
+
+  return answer.toLowerCase().trim() === "yes-ignore-positions";
 }
 
 // =============================================================================
@@ -575,33 +694,164 @@ export async function runOrchestrator(config: OrchestratorConfig): Promise<void>
     }
 
     // =========================================================================
-    // STARTUP: Find initial market
+    // POSITION DETECTION: Check for existing positions to resume
     // =========================================================================
-    setPhase(state, "startup");
-    log(`\n[Orchestrator] Finding best market...`);
+    log(`\n[Orchestrator] Checking for existing positions...`);
 
-    const initialMarket = await findBestMarket(config.liquidity, {
-      maxMinSize: config.orderSize, // Filter out markets where minSize > our orderSize
-      volatilityThresholds: config.volatilityFilter, // Filter volatile markets
-      onFetchProgress: (fetched, total, filtered) => {
-        printDiscoveryProgress("Fetch", `${fetched}/${total} markets, ${filtered} passed filters`);
-      },
-      onCompetitionProgress: (fetched, total) => {
-        printDiscoveryProgress("Competition", `${fetched}/${total} orderbooks`);
-      },
-      onVolatilityProgress: (checked, total, filtered) => {
-        printDiscoveryProgress("Volatility", `${checked}/${total} checked, ${filtered} filtered`);
-      },
-    });
+    const detectedPositions = await detectExistingPositions(client);
 
-    if (!initialMarket) {
-      throw new Error("No eligible markets found during startup");
+    // Check-only mode: report positions and exit
+    if (config.checkPositionsOnly) {
+      if (detectedPositions.length === 0) {
+        log("[Orchestrator] No existing positions detected");
+      } else {
+        printPositionsSummary(detectedPositions);
+      }
+      log("[Orchestrator] Check complete (--check-positions-only mode)");
+      return;
     }
 
-    // Set initial market
-    printSelectedMarket(initialMarket);
+    let shouldResume = false;
+    let resumePosition: DetectedPosition | null = null;
+
+    if (detectedPositions.length > 0) {
+      // Found existing positions
+      resumePosition = findPriorityMarket(detectedPositions);
+
+      if (!resumePosition) {
+        log("[Orchestrator] Warning: Positions detected but none prioritized");
+      } else {
+        // Handle based on configuration
+        if (config.ignorePositions) {
+          // User wants to ignore positions (dangerous)
+          log("[Orchestrator] ⚠️  --ignore-positions flag set");
+          const confirmed = await promptIgnorePositions();
+          
+          if (!confirmed) {
+            log("[Orchestrator] Position ignore cancelled by user");
+            log("[Orchestrator] Resuming existing position instead");
+            shouldResume = true;
+          } else {
+            log("[Orchestrator] ⚠️  User confirmed ignoring existing positions");
+            log("[Orchestrator] WARNING: Capital will be fragmented across markets!");
+            shouldResume = false;
+          }
+        } else if (config.autoResume) {
+          // Auto-resume mode (24/7 operation)
+          log(`[Orchestrator] Found position in ${resumePosition.conditionId.substring(0, 18)}...`);
+          log("[Orchestrator] Auto-resuming (--auto-resume enabled)");
+          shouldResume = true;
+        } else {
+          // Supervised mode - prompt user
+          shouldResume = await promptResumePosition(resumePosition);
+          
+          if (!shouldResume) {
+            log("[Orchestrator] User declined to resume position");
+            log("[Orchestrator] Continuing with new market discovery");
+            log("[Orchestrator] ⚠️  WARNING: This may fragment your capital!");
+          }
+        }
+      }
+    } else {
+      log("[Orchestrator] No existing positions detected");
+    }
+
+    // =========================================================================
+    // STARTUP: Find or resume initial market
+    // =========================================================================
+    setPhase(state, "startup");
+
+    let initialMarket: RankedMarketByEarnings | null = null;
+    let initialConfig: OrchestratableMarketMakerConfig | null = null;
+
+    if (shouldResume && resumePosition) {
+      // ===================================================================
+      // RESUME PATH: Load existing market
+      // ===================================================================
+      log(`\n[Orchestrator] Resuming market: ${resumePosition.conditionId.substring(0, 18)}...`);
+
+      const resumedConfig = await createConfigFromPosition(resumePosition, config, state);
+
+      if (!resumedConfig) {
+        log("[Orchestrator] Error: Failed to load market data for resume");
+        log("[Orchestrator] Falling back to new market discovery");
+        
+        // Fall through to discovery path below
+      } else {
+        // Successfully loaded, we can resume
+        // We need to reconstruct a RankedMarketByEarnings for consistency
+        // But we don't have full market data, so we'll create a minimal version
+        log("[Orchestrator] Successfully loaded market config");
+        initialConfig = resumedConfig;
+        
+        // Create a placeholder market object for state tracking
+        // This is not ideal but necessary for the current architecture
+        initialMarket = {
+          id: resumePosition.conditionId,
+          conditionId: resumePosition.conditionId,
+          question: resumePosition.marketQuestion ?? `Market ${resumePosition.conditionId.substring(0, 8)}`,
+          clobTokenIds: `["${resumePosition.yesTokenId}","${resumePosition.noTokenId}"]`,
+          eventSlug: "resumed",
+          eventTitle: "Resumed Market",
+          slug: "resumed-market",
+          active: true,
+          closed: false,
+          acceptingOrders: true,
+          enableOrderBook: true,
+          negRisk: false,
+          liquidityNum: 0,
+          volume24hr: 0,
+          rewardsMinSize: resumedConfig.market.minOrderSize,
+          rewardsMaxSpread: resumedConfig.market.maxSpread,
+          rewardsDaily: resumedConfig.market.rewardsDaily ?? 0,
+          competitive: 0, // Unknown for resumed markets
+          earningPotential: {
+            estimatedDailyEarnings: 0, // Will be calculated during operation
+            earningEfficiency: 0,
+            easeOfParticipation: 0,
+            totalScore: 0,
+            compatible: true,
+          },
+        } as RankedMarketByEarnings;
+
+        log(`[Orchestrator] Resumed: ${initialMarket.question}`);
+      }
+    }
+
+    // If resume failed or was declined, discover new market
+    if (!initialConfig || !initialMarket) {
+      // ===================================================================
+      // DISCOVERY PATH: Find best market
+      // ===================================================================
+      log(`\n[Orchestrator] Finding best market...`);
+
+      const discoveredMarket = await findBestMarket(config.liquidity, {
+        maxMinSize: config.orderSize,
+        volatilityThresholds: config.volatilityFilter,
+        onFetchProgress: (fetched, total, filtered) => {
+          printDiscoveryProgress("Fetch", `${fetched}/${total} markets, ${filtered} passed filters`);
+        },
+        onCompetitionProgress: (fetched, total) => {
+          printDiscoveryProgress("Competition", `${fetched}/${total} orderbooks`);
+        },
+        onVolatilityProgress: (checked, total, filtered) => {
+          printDiscoveryProgress("Volatility", `${checked}/${total} checked, ${filtered} filtered`);
+        },
+      });
+
+      if (!discoveredMarket) {
+        throw new Error("No eligible markets found during startup");
+      }
+
+      initialMarket = discoveredMarket;
+      initialConfig = createConfigForMarket(initialMarket, config, state);
+      
+      printSelectedMarket(initialMarket);
+    }
+
+    // Set initial market and config
     state.currentMarket = initialMarket;
-    state.currentConfig = createConfigForMarket(initialMarket, config, state);
+    state.currentConfig = initialConfig;
     state.marketsVisited.push(initialMarket.conditionId);
 
     if (config.onEvent) {
@@ -778,17 +1028,24 @@ Options:
   --volatility-lookback <n>    Lookback window in minutes (default: 60)
   --no-volatility-filter       Disable volatility filtering entirely
   
+  Position Resume (restart protection):
+  --auto-resume                Auto-resume positions without prompting (24/7 mode)
+  --ignore-positions           Force new market discovery (DANGEROUS, prompts for confirmation)
+  --check-positions-only       Only check and report positions, don't start
+  
   --enable-switching           Enable automatic market switching
   --no-dry-run                 Place real orders (careful!)
   --dry-run                    Simulate orders (default)
   --help, -h                   Show this help
 
 How it works:
-  1. Finds the best market based on earning potential
-  2. Runs market maker continuously
-  3. Every N minutes, checks if a better market exists
-  4. If better market found, sets "pending switch"
-  5. When position becomes neutral AND pending switch exists, switches markets
+  1. On startup, checks for existing positions to prevent capital fragmentation
+  2. If position found: prompts to resume (or auto-resumes with --auto-resume)
+  3. If no position: finds the best market based on earning potential
+  4. Runs market maker continuously
+  5. Every N minutes, checks if a better market exists
+  6. If better market found, sets "pending switch"
+  7. When position becomes neutral AND pending switch exists, switches markets
 
 Examples:
   npm run orchestrate                          # Dry run, log switching decisions
@@ -796,6 +1053,8 @@ Examples:
   npm run orchestrate -- --re-evaluate-interval 10  # Check every 10 min
   npm run orchestrate -- --max-volatility 0.15 # Allow 15% price changes
   npm run orchestrate -- --no-volatility-filter  # Disable volatility filter
+  npm run orchestrate -- --check-positions-only  # Just check for positions
+  npm run orchestrate -- --auto-resume         # Auto-resume mode (24/7)
   npm run orchestrate -- --enable-switching    # Enable switching (still dry run)
   npm run orchestrate -- --enable-switching --no-dry-run  # Full live mode
 `);
