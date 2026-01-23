@@ -18,6 +18,8 @@ polymarket-trader/
 │   └── strategies/
 │       ├── market-maker.md         # Market maker strategy documentation
 │       └── market-maker-roadmap.md # Market maker future enhancements
+├── data/                 # Trading history data (auto-generated)
+│   └── fills-*.json      # Position tracking and fill history per market
 ├── src/
 │   ├── config/           # Application configuration
 │   │   ├── index.ts      # CLOB and Gamma API hosts, chain settings
@@ -48,22 +50,27 @@ polymarket-trader/
 │   │   ├── positions.ts  # Position tracking types
 │   │   ├── rewards.ts    # Types for reward eligibility checking
 │   │   └── strategy.ts   # Shared strategy types (MarketParams, etc.)
-│   └── utils/            # Shared utility modules
-│       ├── authClient.ts # Authenticated ClobClient factory (for trading)
-│       ├── balance.ts    # USDC and token balance utilities
-│       ├── client.ts     # Read-only ClobClient factory
-│       ├── ctf.ts        # Conditional Token Framework operations (split/merge/approve via Safe)
-│       ├── safe.ts       # Safe (Gnosis Safe) SDK utilities for transaction execution
-│       ├── env.ts        # Environment variable management
-│       ├── formatters.ts # Output formatting utilities
-│       ├── gamma.ts      # Gamma API utilities (fetch events, parse markets)
-│       ├── helpers.ts    # Common utilities (sleep, logging)
-│       ├── inventory.ts  # Inventory management (status, requirements, pre-flight)
-│       ├── markets.ts    # Market data utilities (sorting, outcome helpers)
-│       ├── orderbook.ts  # Order book fetching utilities
-│       ├── orders.ts     # Order placement and management utilities
-│       ├── positions.ts  # Position tracking utilities
-│       └── rewards.ts    # Reward calculation and eligibility checking
+│   ├── utils/            # Shared utility modules
+│   │   ├── authClient.ts # Authenticated ClobClient factory (for trading)
+│   │   ├── balance.ts    # USDC and token balance utilities
+│   │   ├── client.ts     # Read-only ClobClient factory
+│   │   ├── ctf.ts        # Conditional Token Framework operations (split/merge/approve via Safe)
+│   │   ├── safe.ts       # Safe (Gnosis Safe) SDK utilities for transaction execution
+│   │   ├── env.ts        # Environment variable management
+│   │   ├── formatters.ts # Output formatting utilities
+│   │   ├── gamma.ts      # Gamma API utilities (fetch events, parse markets)
+│   │   ├── helpers.ts    # Common utilities (sleep, logging)
+│   │   ├── inventory.ts  # Inventory management (status, requirements, pre-flight)
+│   │   ├── markets.ts    # Market data utilities (sorting, outcome helpers)
+│   │   ├── orderbook.ts  # Order book fetching utilities
+│   │   ├── orders.ts     # Order placement and management utilities
+│   │   ├── positions.ts  # Position tracking utilities
+│   │   └── rewards.ts    # Reward calculation and eligibility checking
+│   └── visualization/    # Trading data visualization dashboard
+│       ├── index.html        # Main dashboard HTML (single-page app)
+│       ├── app.js            # Chart.js visualization logic
+│       ├── updateManifest.js # Auto-generates manifest from data/*.json
+│       └── manifest.json     # Generated index of trading sessions
 ├── .env                  # Environment variables (not committed)
 ├── .env.example          # Example environment template
 ├── package.json          # Project configuration
@@ -718,6 +725,39 @@ Example shutdown summary:
 ============================================================
 ```
 
+### `src/visualization/`
+Web-based visualization dashboard for analyzing trading history.
+
+**Purpose:** Provides interactive charts and analytics for trading sessions stored in `data/fills-*.json`.
+
+**Features:**
+- **Automatic session discovery** - Scans `data/` directory and generates manifest
+- **Interactive charts** (powered by Chart.js via CDN):
+  - Price evolution timeline (YES/NO trade prices over time)
+  - Position building chart (cumulative YES/NO tokens + net exposure)
+  - Trade distribution histogram (volume by price level)
+  - P&L tracking (cumulative cost over time)
+- **Session statistics** - Trade count, volume, positions, average prices
+- **Sidebar navigation** - Quick switching between trading sessions
+- **Dark theme** - Optimized for comfortable viewing
+
+**Files:**
+- `index.html` - Single-page dashboard UI
+- `app.js` - Chart rendering and data processing logic
+- `updateManifest.js` - Node.js script to scan `data/` and generate manifest
+- `manifest.json` - Auto-generated index of available trading sessions
+
+**Usage:**
+```bash
+npm run visualize    # Generates manifest + serves on http://localhost:3000
+```
+
+**Technical Notes:**
+- Zero build process - vanilla HTML/JS with Chart.js from CDN
+- Uses `http-server` via `npx` (no installation required)
+- Manifest updates automatically on each launch
+- All data processing happens client-side (no backend needed)
+
 ## Environment Variables
 
 | Variable | Required | Description |
@@ -747,6 +787,9 @@ npm run findBestMarkets -- --details 1                # Show details for top mar
 npm run marketMaker                                   # Run market maker bot (configure first!)
 npm run orchestrate                                   # Run orchestrator (auto market selection)
 npm run orchestrate -- --help                         # Show orchestrator options
+
+# Visualization
+npm run visualize                                     # Launch trading data visualization dashboard
 ```
 
 ## APIs Used
@@ -824,4 +867,4 @@ The Safe SDK (`@safe-global/protocol-kit`) handles:
 - All utilities in `src/utils/`
 
 ---
-*Last updated: 2026-01-23 - Added volatility filtering system to prevent adverse selection in volatile markets*
+*Last updated: 2026-01-23 - Added web-based visualization dashboard for trading history analytics*

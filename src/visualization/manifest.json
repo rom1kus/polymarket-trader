@@ -1,0 +1,38 @@
+{
+  "generated": 1769182217477,
+  "count": 4,
+  "files": [
+    {
+      "filename": "fills-64bd4fb1eef5ec8d.json",
+      "conditionId": "0x64bd4fb1eef5ec8d4e8f6ed219df12304cf56087f1a191852f9f7af7ccfc140a",
+      "tradeCount": 1,
+      "lastUpdated": 1769179475847,
+      "fileSize": 1168,
+      "modified": 1769179475847.6492
+    },
+    {
+      "filename": "fills-56b02b1d3277c191.json",
+      "conditionId": "0x56b02b1d3277c1915ff4fae05330af968a429dab9afa524047c917d8e13e4839",
+      "tradeCount": 0,
+      "lastUpdated": 1769179343129,
+      "fileSize": 679,
+      "modified": 1769179343129.8472
+    },
+    {
+      "filename": "fills-5d599b292917c20f.json",
+      "conditionId": "0x5d599b292917c20fda9c25793791efe7a2c9e51fe6b18737ecebe4a042431dc3",
+      "tradeCount": 0,
+      "lastUpdated": 1769179209667,
+      "fileSize": 679,
+      "modified": 1769179209667.681
+    },
+    {
+      "filename": "fills-c7628d43f0cd0e94.json",
+      "conditionId": "0xc7628d43f0cd0e94ef4e0513c14d790c3e9ff54f078cfe517d8c19eaa900e82b",
+      "tradeCount": 14,
+      "lastUpdated": 1769008144013,
+      "fileSize": 7549,
+      "modified": 1769008144013.5051
+    }
+  ]
+}

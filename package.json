@@ -11,7 +11,8 @@
     "marketMaker": "tsx src/strategies/marketMaker/index.ts",
     "orchestrate": "tsx src/scripts/orchestrate.ts",
     "checkRewards": "tsx src/scripts/checkRewards.ts",
-    "test:volatility": "tsx src/scripts/testVolatility.ts"
+    "test:volatility": "tsx src/scripts/testVolatility.ts",
+    "visualize": "node src/visualization/updateManifest.js && npx http-server -p 3000 -o /src/visualization"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
