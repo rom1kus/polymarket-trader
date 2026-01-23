@@ -49,3 +49,45 @@ export interface OrderBookData {
   /** Fallback price from Gamma API (always available) */
   gammaPrice: number;
 }
+
+/**
+ * Price snapshot at a specific point in time.
+ * Returned by CLOB /prices-history endpoint.
+ */
+export interface PriceSnapshot {
+  /** Unix timestamp in seconds */
+  t: number;
+  /** Price at this timestamp */
+  p: number;
+}
+
+/**
+ * Volatility metrics calculated from price history.
+ */
+export interface VolatilityMetrics {
+  /** Percentage change from first to last price (e.g., 0.15 = 15%) */
+  priceChangePercent: number;
+  /** Largest single move between consecutive points (e.g., 0.08 = 8%) */
+  maxMove: number;
+  /** Time window analyzed in minutes */
+  timeWindowMinutes: number;
+  /** Number of data points analyzed */
+  dataPoints: number;
+}
+
+/**
+ * Thresholds for determining if a market is too volatile.
+ */
+export interface VolatilityThresholds {
+  /** Maximum allowed price change percentage (e.g., 0.15 = 15%) */
+  maxPriceChangePercent: number;
+  /** Time window to analyze in minutes (e.g., 10) */
+  lookbackMinutes: number;
+}
+
+/**
+ * Price history response from CLOB API /prices-history endpoint.
+ */
+export interface PriceHistoryResponse {
+  history: PriceSnapshot[];
+}

@@ -441,11 +441,15 @@ async function reEvaluateMarkets(
     // =========================================================================
     const bestMarket = await findBestMarket(config.liquidity, {
       maxMinSize: config.orderSize, // Filter out markets where minSize > our orderSize
+      volatilityThresholds: config.volatilityFilter, // Filter volatile markets
       onFetchProgress: (fetched, total, filtered) => {
         printDiscoveryProgress("Fetch", `${fetched}/${total} markets, ${filtered} passed filters`);
       },
       onCompetitionProgress: (fetched, total) => {
         printDiscoveryProgress("Competition", `${fetched}/${total} orderbooks`);
+      },
+      onVolatilityProgress: (checked, total, filtered) => {
+        printDiscoveryProgress("Volatility", `${checked}/${total} checked, ${filtered} filtered`);
       },
     });
 
@@ -578,11 +582,15 @@ export async function runOrchestrator(config: OrchestratorConfig): Promise<void>
 
     const initialMarket = await findBestMarket(config.liquidity, {
       maxMinSize: config.orderSize, // Filter out markets where minSize > our orderSize
+      volatilityThresholds: config.volatilityFilter, // Filter volatile markets
       onFetchProgress: (fetched, total, filtered) => {
         printDiscoveryProgress("Fetch", `${fetched}/${total} markets, ${filtered} passed filters`);
       },
       onCompetitionProgress: (fetched, total) => {
         printDiscoveryProgress("Competition", `${fetched}/${total} orderbooks`);
+      },
+      onVolatilityProgress: (checked, total, filtered) => {
+        printDiscoveryProgress("Volatility", `${checked}/${total} checked, ${filtered} filtered`);
       },
     });
 
@@ -764,6 +772,12 @@ Options:
   --re-evaluate-interval <n>   Minutes between market re-evaluation (default: 5)
   --order-size <n>             Order size in shares (default: 20)
   --spread <n>                 Spread percent 0-1 (default: 0.5)
+  
+  Volatility Filtering (default: enabled):
+  --max-volatility <n>         Max price change threshold (default: 0.10 = 10%)
+  --volatility-lookback <n>    Lookback window in minutes (default: 60)
+  --no-volatility-filter       Disable volatility filtering entirely
+  
   --enable-switching           Enable automatic market switching
   --no-dry-run                 Place real orders (careful!)
   --dry-run                    Simulate orders (default)
@@ -780,6 +794,8 @@ Examples:
   npm run orchestrate                          # Dry run, log switching decisions
   npm run orchestrate -- --liquidity 200       # Higher liquidity
   npm run orchestrate -- --re-evaluate-interval 10  # Check every 10 min
+  npm run orchestrate -- --max-volatility 0.15 # Allow 15% price changes
+  npm run orchestrate -- --no-volatility-filter  # Disable volatility filter
   npm run orchestrate -- --enable-switching    # Enable switching (still dry run)
   npm run orchestrate -- --enable-switching --no-dry-run  # Full live mode
 `);

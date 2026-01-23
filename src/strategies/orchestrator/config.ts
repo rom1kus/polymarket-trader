@@ -11,6 +11,7 @@ import {
   DEFAULT_WEBSOCKET_PARAMS,
   DEFAULT_POSITION_LIMITS,
 } from "../marketMaker/config.js";
+import type { VolatilityThresholds } from "../../types/polymarket.js";
 
 /**
  * Orchestrator configuration options.
@@ -43,6 +44,20 @@ export interface OrchestratorConfig {
    * @default 300000 (5 minutes)
    */
   reEvaluateIntervalMs: number;
+
+  /**
+   * Volatility filtering configuration.
+   * If enabled, markets with excessive price movement are filtered out
+   * during discovery to prevent adverse selection.
+   * Set to undefined to disable volatility filtering.
+   * 
+   * Default: Conservative settings (10% max change over 1 hour)
+   * - Prevents entering markets like the Zelenskyy WEF incident (31% move)
+   * - Can be relaxed with --max-volatility flag if needed
+   * 
+   * @default { maxPriceChangePercent: 0.10, lookbackMinutes: 60 }
+   */
+  volatilityFilter?: VolatilityThresholds;
 
   // =========================================================================
   // Market Maker Settings (passed to each market maker instance)
@@ -112,6 +127,13 @@ export const DEFAULT_ORCHESTRATOR_CONFIG: OrchestratorConfig = {
   minEarningsImprovement: 0.2, // 20% improvement required to switch
   reEvaluateIntervalMs: 5 * 60 * 1000, // 5 minutes
 
+  // Volatility filtering (enabled by default per FINDINGS.md recommendations)
+  // Conservative settings to prevent adverse selection
+  volatilityFilter: {
+    maxPriceChangePercent: 0.10, // 10% max price change (conservative)
+    lookbackMinutes: 60, // Over 1-hour window
+  },
+
   // Market maker settings
   orderSize: 20,
   spreadPercent: 0.5,
@@ -155,6 +177,10 @@ export function createOrchestratorConfig(
       ...DEFAULT_ORCHESTRATOR_CONFIG.merge,
       ...overrides?.merge,
     },
+    volatilityFilter:
+      overrides?.volatilityFilter !== undefined
+        ? overrides.volatilityFilter
+        : DEFAULT_ORCHESTRATOR_CONFIG.volatilityFilter,
   };
 }
 
@@ -167,6 +193,9 @@ export function createOrchestratorConfig(
  * - --re-evaluate-interval <minutes>: How often to check for better markets (default: 5)
  * - --order-size <number>: Order size in shares
  * - --spread <number>: Spread percent (0-1)
+ * - --max-volatility <number>: Max price change % threshold (e.g., 0.15 for 15%)
+  * - --volatility-lookback <minutes>: Volatility lookback window in minutes (default: 60)
+ * - --no-volatility-filter: Disable volatility filtering entirely
  * - --enable-switching: Enable actual market switching
  * - --no-dry-run: Disable dry run (place real orders)
  *
@@ -175,6 +204,8 @@ export function createOrchestratorConfig(
  */
 export function parseOrchestratorArgs(args: string[]): Partial<OrchestratorConfig> {
   const config: Partial<OrchestratorConfig> = {};
+  let volatilityConfig: Partial<VolatilityThresholds> = {};
+  let disableVolatilityFilter = false;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -217,6 +248,24 @@ export function parseOrchestratorArgs(args: string[]): Partial<OrchestratorConfi
         }
         break;
 
+      case "--max-volatility":
+        if (nextArg) {
+          volatilityConfig.maxPriceChangePercent = parseFloat(nextArg);
+          i++;
+        }
+        break;
+
+      case "--volatility-lookback":
+        if (nextArg) {
+          volatilityConfig.lookbackMinutes = parseFloat(nextArg);
+          i++;
+        }
+        break;
+
+      case "--no-volatility-filter":
+        disableVolatilityFilter = true;
+        break;
+
       case "--enable-switching":
         config.enableSwitching = true;
         break;
@@ -229,6 +278,23 @@ export function parseOrchestratorArgs(args: string[]): Partial<OrchestratorConfi
         config.dryRun = true;
         break;
     }
+  }
+
+  // Apply volatility config if specified
+  if (disableVolatilityFilter) {
+    config.volatilityFilter = undefined;
+  } else if (
+    volatilityConfig.maxPriceChangePercent !== undefined ||
+    volatilityConfig.lookbackMinutes !== undefined
+  ) {
+    config.volatilityFilter = {
+      maxPriceChangePercent:
+        volatilityConfig.maxPriceChangePercent ??
+        DEFAULT_ORCHESTRATOR_CONFIG.volatilityFilter!.maxPriceChangePercent,
+      lookbackMinutes:
+        volatilityConfig.lookbackMinutes ??
+        DEFAULT_ORCHESTRATOR_CONFIG.volatilityFilter!.lookbackMinutes,
+    };
   }
 
   return config;

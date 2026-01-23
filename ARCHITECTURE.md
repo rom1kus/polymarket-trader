@@ -96,6 +96,10 @@ Custom types for Polymarket CLOB API responses not exported by `@polymarket/clob
 - `Market` - Market data structure from CLOB API
 - `MarketsResponse` - Paginated markets response (extends `PaginationPayload`)
 - `OrderBookData` - Order book pricing data combining CLOB and Gamma prices
+- `PriceSnapshot` - Price snapshot at a point in time (from `/prices-history` endpoint)
+- `PriceHistoryResponse` - Response from CLOB price history endpoint
+- `VolatilityMetrics` - Calculated volatility metrics (price change %, max move, etc.)
+- `VolatilityThresholds` - Configuration for volatility filtering (max change %, lookback window)
 
 #### `src/types/gamma.ts`
 Types for Polymarket Gamma API responses (event and market metadata):
@@ -338,13 +342,34 @@ Common helper utilities:
 
 - `formatDuration(ms)` - Formats duration in milliseconds to human-readable (e.g., "2h 30m 15s")
 
+#### `src/utils/volatility.ts`
+Market volatility detection utilities for filtering out dangerous markets:
+- `fetchPriceHistory(tokenId, interval, fetcher?)` - Fetches historical price data from CLOB API
+- `calculatePriceVolatility(priceHistory, windowMinutes)` - Calculates volatility metrics (% change, max move)
+- `isMarketSafe(tokenId, thresholds, fetcher?)` - Determines if market passes volatility check
+- `checkMarketVolatility(tokenId, marketName, thresholds, fetcher?)` - With detailed logging
+
+**Purpose:** Prevents adverse selection by filtering out markets with excessive price movement (e.g., >10% in 10 minutes by default, conservative setting).
+
+**How it works:**
+1. Fetches 1 hour of price history from CLOB `/prices-history` endpoint (public, no auth required)
+2. Analyzes recent window (default: 10 minutes)
+3. Filters out markets exceeding threshold (default: 10% change, conservative)
+4. Conservative approach: skips market on API failure
+
+**Used by:** Market discovery to proactively filter volatile markets before entering
+
+**Configuration:** See `volatilityFilter` in orchestrator config
+
 #### `src/utils/marketDiscovery.ts`
 Market discovery utilities for finding and ranking markets by earning potential:
 - `discoverMarkets(options?)` - Main discovery function, fetches and ranks markets
-- `findBestMarket(liquidity, options?)` - Convenience function to get single best market
+- `findBestMarket(liquidity, options?)` - Finds single best market with optimized volatility checking
 - `rankMarketsByEarnings(markets, liquidity)` - Ranks markets by estimated daily earnings
 - `fetchRealCompetition(markets, options?)` - Fetches real Q scores from orderbooks
 - `getFirstTokenId(market)` - Extracts first token ID from clobTokenIds field
+
+**Volatility Filtering Integration:** When `volatilityThresholds` is provided to `findBestMarket()`, it uses an optimized approach that checks volatility only on top-ranked candidates (not all markets upfront). This is more efficient than bulk filtering and ensures the best safe market is found quickly.
 
 **NegRisk Market Filtering:** NegRisk markets (multi-outcome markets) are automatically filtered out during ranking due to signature compatibility issues with the current implementation. This requires testing and fixing to support NegRisk markets.
 
@@ -584,6 +609,10 @@ Automatic market selection and switching orchestrator.
 **Key Features:**
 - Uses `findBestMarket()` from `@/utils/marketDiscovery.ts`
 - Uses `generateMarketConfig()` from `@/utils/marketConfigGenerator.ts`
+- **Volatility filtering**: Filters out markets with excessive price movement (>10% in 60 min by default, conservative) to prevent adverse selection
+  - Uses optimized top-first checking (only checks top-ranked candidates, not all markets)
+  - Configurable via `--max-volatility` and `--volatility-lookback` flags
+  - Can be disabled with `--no-volatility-filter`
 - **Actual earnings comparison**: Uses `calculateActualEarnings()` to compare real performance vs estimated potential
 - **Periodic re-evaluation** with configurable interval (default 5 minutes)
 - **Pending switch pattern**: Better market sets flag, switch executes when neutral
@@ -605,6 +634,9 @@ npm run orchestrate                          # Dry run, log switching decisions
 npm run orchestrate -- --liquidity 200       # Custom liquidity amount
 npm run orchestrate -- --threshold 0.15      # 15% improvement threshold
 npm run orchestrate -- --re-evaluate-interval 10  # Check every 10 minutes
+npm run orchestrate -- --max-volatility 0.15      # 15% max price change threshold
+npm run orchestrate -- --volatility-lookback 60   # 60-minute lookback window (default)
+npm run orchestrate -- --no-volatility-filter     # Disable volatility filtering
 npm run orchestrate -- --enable-switching    # Enable market switching (still dry run)
 npm run orchestrate -- --enable-switching --no-dry-run  # Full live mode
 ```
@@ -792,4 +824,4 @@ The Safe SDK (`@safe-global/protocol-kit`) handles:
 - All utilities in `src/utils/`
 
 ---
-*Last updated: 2026-01-21 - Documented WebSocket token filtering, 0.1 dust threshold, and NegRisk market exclusion*
+*Last updated: 2026-01-23 - Added volatility filtering system to prevent adverse selection in volatile markets*

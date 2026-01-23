@@ -22,6 +22,11 @@ npm run orchestrate
 # With custom liquidity
 npm run orchestrate -- --liquidity 200
 
+# Adjust volatility filtering
+npm run orchestrate -- --max-volatility 0.15      # Allow 15% price changes
+npm run orchestrate -- --volatility-lookback 30   # 30-minute lookback
+npm run orchestrate -- --no-volatility-filter     # Disable filter entirely
+
 # Enable switching (still dry run)
 npm run orchestrate -- --enable-switching
 
@@ -100,6 +105,9 @@ Example with 20% threshold:
 | `--re-evaluate-interval <n>` | 5 | Minutes between market checks |
 | `--order-size <n>` | 20 | Order size in shares |
 | `--spread <n>` | 0.5 | Spread as fraction of maxSpread (0-1) |
+| `--max-volatility <n>` | 0.10 | Max price change % threshold (0.10 = 10%) |
+| `--volatility-lookback <n>` | 60 | Volatility lookback window in minutes |
+| `--no-volatility-filter` | - | Disable volatility filtering entirely |
 | `--enable-switching` | false | Enable automatic market switching |
 | `--no-dry-run` | false | Place real orders |
 | `--dry-run` | true | Simulate orders (default) |
@@ -161,6 +169,11 @@ Markets are filtered by:
 - Active reward program
 - Compatible with your liquidity amount (minSize)
 - Binary markets (YES/NO outcomes)
+- **Volatility filtering (default enabled):** Markets with excessive price movement are filtered out to prevent adverse selection
+  - Default: >10% price change over 60-minute window (conservative)
+  - Configurable via `--max-volatility` and `--volatility-lookback` flags
+  - Can be disabled with `--no-volatility-filter`
+  - Uses optimized top-first checking (only checks top-ranked candidates, not all markets upfront for performance)
 - **NegRisk exclusion:** NegRisk markets (multi-outcome markets) are automatically excluded due to signature compatibility issues (requires testing and fixing)
 
 ## Session Summary
@@ -209,6 +222,10 @@ On shutdown, the orchestrator prints a summary:
 
 [2026-01-19 10:00:01] [Orchestrator] Finding best market...
 [2026-01-19 10:00:02] [Discovery] Fetch: 45/120 markets, 12 passed filters
+[2026-01-19 10:00:04] [Discovery] Using optimized volatility checking (top-first)
+[2026-01-19 10:00:04] [Discovery] Ranked 12 markets by earnings, checking volatility on top candidates...
+[2026-01-19 10:00:04]   ✅ "Will Bitcoin reach $100k by March 2026?" - 2.3% move (safe)
+[2026-01-19 10:00:04] [Discovery] Found safe market after checking 1 candidates (0 filtered)
 [2026-01-19 10:00:05] [Discovery] Competition: 12/12 orderbooks
 
 ──────────────────────────────────────────────────────────────────────

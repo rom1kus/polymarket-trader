@@ -41,6 +41,9 @@ import {
   fetchBatchCompetition,
   type MarketForCompetition,
 } from "@/utils/orderbook.js";
+import { checkMarketVolatility } from "@/utils/volatility.js";
+import type { VolatilityThresholds } from "@/types/polymarket.js";
+import { log } from "@/utils/helpers.js";
 
 /**
  * Options for market discovery.
@@ -63,6 +66,17 @@ export interface MarketDiscoveryOptions {
 
   /** Skip competition calculation (use API values, may be stale) */
   skipCompetitionFetch?: boolean;
+}
+
+/**
+ * Extended options for findBestMarket with volatility filtering.
+ */
+export interface FindBestMarketOptions extends Omit<MarketDiscoveryOptions, "liquidity" | "limit"> {
+  /** Volatility filtering thresholds (undefined = skip filtering) */
+  volatilityThresholds?: VolatilityThresholds;
+
+  /** Progress callback for volatility filtering phase */
+  onVolatilityProgress?: (checked: number, total: number, filtered: number) => void;
 }
 
 /**
@@ -213,6 +227,9 @@ export async function fetchRealCompetition(
  * 2. Calculates real competition from orderbooks
  * 3. Ranks markets by estimated daily earnings
  *
+ * Note: Volatility filtering is handled by findBestMarket() using an
+ * optimized approach (checking top candidates only).
+ *
  * @param options - Discovery options
  * @returns Discovery result with ranked markets
  */
@@ -283,8 +300,12 @@ export async function discoverMarkets(
 /**
  * Finds the single best market for a given liquidity amount.
  *
- * This is a convenience function for the orchestrator that returns
- * only the top-ranked market.
+ * Optimized version that checks volatility only on top candidates:
+ * 1. Fetches markets with rewards
+ * 2. Calculates competition and ranks by earnings
+ * 3. Iterates through top markets checking volatility until a safe one is found
+ *
+ * This is much faster than checking volatility on all markets upfront.
  *
  * @param liquidity - Liquidity amount in USD
  * @param options - Additional discovery options
@@ -300,15 +321,73 @@ export async function discoverMarkets(
  */
 export async function findBestMarket(
   liquidity: number,
-  options: Omit<MarketDiscoveryOptions, "liquidity" | "limit"> = {}
+  options: FindBestMarketOptions = {}
 ): Promise<RankedMarketByEarnings | null> {
+  // If no volatility filtering requested, use old approach
+  if (!options.volatilityThresholds) {
+    const result = await discoverMarkets({
+      ...options,
+      liquidity,
+      limit: 1,
+    });
+    return result.markets[0] ?? null;
+  }
+
+  // Optimized approach: rank first, then check volatility iteratively
+  log("[Discovery] Using optimized volatility checking (top-first)");
+
+  // Get all markets ranked by earnings WITHOUT volatility filtering
   const result = await discoverMarkets({
-    ...options,
+    maxMinSize: options.maxMinSize,
+    skipCompetitionFetch: options.skipCompetitionFetch,
+    onFetchProgress: options.onFetchProgress,
+    onCompetitionProgress: options.onCompetitionProgress,
     liquidity,
-    limit: 1,
   });
 
-  return result.markets[0] ?? null;
+  if (result.markets.length === 0) {
+    return null;
+  }
+
+  log(`[Discovery] Ranked ${result.markets.length} markets by earnings, checking volatility on top candidates...`);
+
+  // Iterate through ranked markets, checking volatility one at a time
+  let checked = 0;
+  let filtered = 0;
+
+  for (const market of result.markets) {
+    const tokenId = getFirstTokenId(market);
+    if (!tokenId) {
+      checked++;
+      filtered++;
+      if (options.onVolatilityProgress) {
+        options.onVolatilityProgress(checked, result.markets.length, filtered);
+      }
+      continue;
+    }
+
+    // Check this specific market's volatility
+    const isSafe = await checkMarketVolatility(
+      tokenId,
+      market.question,
+      options.volatilityThresholds
+    );
+
+    checked++;
+    if (options.onVolatilityProgress) {
+      options.onVolatilityProgress(checked, result.markets.length, filtered);
+    }
+
+    if (isSafe) {
+      log(`[Discovery] Found safe market after checking ${checked} candidates (${filtered} filtered)`);
+      return market;
+    }
+
+    filtered++;
+  }
+
+  log(`[Discovery] No safe markets found after checking all ${checked} candidates`);
+  return null;
 }
 
 /**
