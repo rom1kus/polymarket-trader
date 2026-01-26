@@ -59,6 +59,18 @@ export interface OrchestratorConfig {
    */
   volatilityFilter?: VolatilityThresholds;
 
+  /**
+   * Exclude NegRisk markets from market selection.
+   * NegRisk markets are multi-outcome markets that use a different exchange contract.
+   * They require special signature handling (negRisk: true in order placement).
+   * 
+   * When false (default), NegRisk markets are allowed and handled correctly.
+   * When true, NegRisk markets are filtered out during discovery.
+   * 
+   * @default false (NegRisk markets allowed)
+   */
+  excludeNegRisk: boolean;
+
   // =========================================================================
   // Market Maker Settings (passed to each market maker instance)
   // =========================================================================
@@ -161,6 +173,9 @@ export const DEFAULT_ORCHESTRATOR_CONFIG: OrchestratorConfig = {
     lookbackMinutes: 60, // Over 1-hour window
   },
 
+  // NegRisk markets (disabled by default - allow all markets)
+  excludeNegRisk: false,
+
   // Market maker settings
   orderSize: 20,
   spreadPercent: 0.5,
@@ -226,8 +241,9 @@ export function createOrchestratorConfig(
  * - --order-size <number>: Order size in shares
  * - --spread <number>: Spread percent (0-1)
  * - --max-volatility <number>: Max price change % threshold (e.g., 0.15 for 15%)
-  * - --volatility-lookback <minutes>: Volatility lookback window in minutes (default: 60)
+ * - --volatility-lookback <minutes>: Volatility lookback window in minutes (default: 60)
  * - --no-volatility-filter: Disable volatility filtering entirely
+ * - --exclude-negrisk: Exclude NegRisk markets from selection
  * - --enable-switching: Enable actual market switching
  * - --no-dry-run: Disable dry run (place real orders)
  * - --auto-resume: Automatically resume positions without prompting (for 24/7 mode)
@@ -299,6 +315,10 @@ export function parseOrchestratorArgs(args: string[]): Partial<OrchestratorConfi
 
       case "--no-volatility-filter":
         disableVolatilityFilter = true;
+        break;
+
+      case "--exclude-negrisk":
+        config.excludeNegRisk = true;
         break;
 
       case "--enable-switching":

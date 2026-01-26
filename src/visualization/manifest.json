@@ -1,38 +1,22 @@
 {
-  "generated": 1769182217477,
-  "count": 4,
+  "generated": 1769437922751,
+  "count": 2,
   "files": [
     {
-      "filename": "fills-64bd4fb1eef5ec8d.json",
-      "conditionId": "0x64bd4fb1eef5ec8d4e8f6ed219df12304cf56087f1a191852f9f7af7ccfc140a",
-      "tradeCount": 1,
-      "lastUpdated": 1769179475847,
-      "fileSize": 1168,
-      "modified": 1769179475847.6492
-    },
-    {
-      "filename": "fills-56b02b1d3277c191.json",
-      "conditionId": "0x56b02b1d3277c1915ff4fae05330af968a429dab9afa524047c917d8e13e4839",
+      "filename": "fills-2b84316a2019d17e.json",
+      "conditionId": "0x2b84316a2019d17e37153ebbcfd6a8a4ccf8ab5db10635c0f176ead6ed4f4368",
       "tradeCount": 0,
-      "lastUpdated": 1769179343129,
+      "lastUpdated": 1769437867490,
       "fileSize": 679,
-      "modified": 1769179343129.8472
+      "modified": 1769437867490.7764
     },
     {
-      "filename": "fills-5d599b292917c20f.json",
-      "conditionId": "0x5d599b292917c20fda9c25793791efe7a2c9e51fe6b18737ecebe4a042431dc3",
+      "filename": "fills-b6f26187d7459a50.json",
+      "conditionId": "0xb6f26187d7459a50e69881a10ec6b08c4c0ec028ad026de8318378959aed6b50",
       "tradeCount": 0,
-      "lastUpdated": 1769179209667,
+      "lastUpdated": 1769437496088,
       "fileSize": 679,
-      "modified": 1769179209667.681
-    },
-    {
-      "filename": "fills-c7628d43f0cd0e94.json",
-      "conditionId": "0xc7628d43f0cd0e94ef4e0513c14d790c3e9ff54f078cfe517d8c19eaa900e82b",
-      "tradeCount": 14,
-      "lastUpdated": 1769008144013,
-      "fileSize": 7549,
-      "modified": 1769008144013.5051
+      "modified": 1769437496088.825
     }
   ]
 }

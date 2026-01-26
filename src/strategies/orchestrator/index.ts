@@ -217,6 +217,7 @@ function printOrchestratorBanner(config: OrchestratorConfig): void {
   console.log(`    Re-evaluate:       Every ${reEvalMinutes.toFixed(1)} minutes`);
   console.log(`    Order Size:        ${config.orderSize} shares`);
   console.log(`    Spread:            ${(config.spreadPercent * 100).toFixed(0)}% of maxSpread`);
+  console.log(`    NegRisk Markets:   ${config.excludeNegRisk ? "EXCLUDED" : "ALLOWED"}`);
   console.log("");
   console.log("  Mode:");
   console.log(`    Dry Run:           ${config.dryRun ? "YES (no real orders)" : "NO (live orders)"}`);
@@ -246,6 +247,7 @@ function printSelectedMarket(market: RankedMarketByEarnings): void {
   console.log(`  Est. Daily: $${market.earningPotential.estimatedDailyEarnings.toFixed(4)}`);
   console.log(`  Min Size:   ${market.rewardsMinSize} shares`);
   console.log(`  Max Spread: ${market.rewardsMaxSpread} cents`);
+  console.log(`  NegRisk:    ${market.negRisk ? "true" : "false"}`);
   console.log(SECTION);
   console.log("");
 }
@@ -561,6 +563,7 @@ async function reEvaluateMarkets(
     const bestMarket = await findBestMarket(config.liquidity, {
       maxMinSize: config.orderSize, // Filter out markets where minSize > our orderSize
       volatilityThresholds: config.volatilityFilter, // Filter volatile markets
+      excludeNegRisk: config.excludeNegRisk, // Filter NegRisk markets if requested
       onFetchProgress: (fetched, total, filtered) => {
         printDiscoveryProgress("Fetch", `${fetched}/${total} markets, ${filtered} passed filters`);
       },
@@ -798,7 +801,7 @@ export async function runOrchestrator(config: OrchestratorConfig): Promise<void>
           closed: false,
           acceptingOrders: true,
           enableOrderBook: true,
-          negRisk: false,
+          negRisk: resumedConfig.market.negRisk, // Use the negRisk from the persisted config
           liquidityNum: 0,
           volume24hr: 0,
           rewardsMinSize: resumedConfig.market.minOrderSize,
@@ -828,6 +831,7 @@ export async function runOrchestrator(config: OrchestratorConfig): Promise<void>
       const discoveredMarket = await findBestMarket(config.liquidity, {
         maxMinSize: config.orderSize,
         volatilityThresholds: config.volatilityFilter,
+        excludeNegRisk: config.excludeNegRisk,
         onFetchProgress: (fetched, total, filtered) => {
           printDiscoveryProgress("Fetch", `${fetched}/${total} markets, ${filtered} passed filters`);
         },

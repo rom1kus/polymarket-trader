@@ -379,7 +379,20 @@ Market discovery utilities for finding and ranking markets by earning potential:
 
 **Volatility Filtering Integration:** When `volatilityThresholds` is provided to `findBestMarket()`, it uses an optimized approach that checks volatility only on top-ranked candidates (not all markets upfront). This is more efficient than bulk filtering and ensures the best safe market is found quickly.
 
-**NegRisk Market Filtering:** NegRisk markets (multi-outcome markets) are automatically filtered out during ranking due to signature compatibility issues with the current implementation. This requires testing and fixing to support NegRisk markets.
+**NegRisk Market Support:** NegRisk markets (multi-outcome markets) are fully supported as of 2026-01-26. The system correctly:
+- Reads the `negRisk` flag from the Gamma API (`neg_risk` field)
+- Passes the correct `negRisk` value when placing orders (required for proper EIP-712 signature creation)
+- Allows filtering NegRisk markets via `--exclude-negrisk` flag (disabled by default)
+
+**How NegRisk Affects Signatures:** The `negRisk` parameter determines which exchange contract is used in the EIP-712 signature domain:
+- `negRisk: false` → Standard exchange (`0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E`)
+- `negRisk: true` → NegRisk exchange (`0xC5d563A36AE78145C45a50134d48A1215220f80a`)
+
+Using the wrong value causes "invalid signature" errors from the CLOB API.
+
+**CTF Operations (Split/Merge) on NegRisk:** The current CTF utilities (`splitPositionFromSafe`, `mergePositionsFromSafe`) use the standard CTF contract and may not work correctly with NegRisk markets. NegRisk markets may require using the NEG_RISK_ADAPTER contract (`0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296`). This needs further testing and implementation.
+
+**NegRisk Filtering:** Can optionally filter out NegRisk markets by passing `excludeNegRisk: true` to `rankMarketsByEarnings()` or `findBestMarket()`. By default (false), NegRisk markets are allowed and handled correctly.
 
 **Used by:** `findBestMarkets.ts` script and orchestrator
 
@@ -673,6 +686,7 @@ npm run orchestrate -- --re-evaluate-interval 10  # Check every 10 minutes
 npm run orchestrate -- --max-volatility 0.15      # 15% max price change threshold
 npm run orchestrate -- --volatility-lookback 60   # 60-minute lookback window (default)
 npm run orchestrate -- --no-volatility-filter     # Disable volatility filtering
+npm run orchestrate -- --exclude-negrisk          # Exclude NegRisk markets
 npm run orchestrate -- --check-positions-only     # Only check positions, don't start
 npm run orchestrate -- --auto-resume              # Enable auto-resume (24/7 mode)
 npm run orchestrate -- --enable-switching         # Enable market switching (still dry run)
@@ -915,5 +929,36 @@ The Safe SDK (`@safe-global/protocol-kit`) handles:
 - All types defined in `src/types/`
 - All utilities in `src/utils/`
 
+## NegRisk Markets
+
+NegRisk markets are multi-outcome markets that require special handling:
+
+### Order Placement
+- **Critical**: Must pass `negRisk: true` when placing orders on NegRisk markets
+- The `negRisk` parameter determines which exchange contract is used for EIP-712 signatures
+- Using the wrong value causes "invalid signature" errors from the CLOB API
+
+### Detection
+- The `negRisk` flag is read from Gamma API's `neg_risk` field
+- All market discovery functions properly read and preserve this flag
+- The orchestrator uses the correct `negRisk` value when creating market configs
+
+### Filtering
+- By default, NegRisk markets are **allowed** in market discovery
+- Use `--exclude-negrisk` flag to filter them out if needed
+- The orchestrator banner shows "NegRisk Markets: ALLOWED/EXCLUDED"
+- Selected market display shows "NegRisk: true/false"
+
+### CTF Operations
+- **Limitation**: Current split/merge operations may not work correctly on NegRisk markets
+- NegRisk markets may require using `NEG_RISK_ADAPTER` contract instead of standard CTF
+- Trading (order placement) works correctly, but auto-merge might fail
+- This requires further testing and implementation
+
+### Contract Addresses
+- Standard Exchange: `0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E`
+- NegRisk Exchange: `0xC5d563A36AE78145C45a50134d48A1215220f80a`
+- NegRisk Adapter: `0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296`
+
 ---
-*Last updated: 2026-01-23 - Added web-based visualization dashboard for trading history analytics*
+*Last updated: 2026-01-26 - Added full NegRisk market support with optional filtering*

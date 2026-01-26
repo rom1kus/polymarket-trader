@@ -58,6 +58,9 @@ export interface MarketDiscoveryOptions {
   /** Maximum minSize requirement filter (default: no filter) */
   maxMinSize?: number;
 
+  /** Exclude NegRisk markets from selection (default: false) */
+  excludeNegRisk?: boolean;
+
   /** Progress callback for fetch phase */
   onFetchProgress?: (fetched: number, total: number, filtered: number) => void;
 
@@ -77,6 +80,9 @@ export interface FindBestMarketOptions extends Omit<MarketDiscoveryOptions, "liq
 
   /** Progress callback for volatility filtering phase */
   onVolatilityProgress?: (checked: number, total: number, filtered: number) => void;
+
+  /** Exclude NegRisk markets from selection (default: false) */
+  excludeNegRisk?: boolean;
 }
 
 /**
@@ -123,11 +129,13 @@ export function getFirstTokenId(market: MarketWithRewards): string | null {
  *
  * @param markets - Markets with reward parameters
  * @param liquidityAmount - Liquidity amount in USD
+ * @param excludeNegRisk - Whether to exclude NegRisk markets (default: false)
  * @returns Markets ranked by estimated daily earnings (highest first)
  */
 export function rankMarketsByEarnings(
   markets: MarketWithRewards[],
-  liquidityAmount: number
+  liquidityAmount: number,
+  excludeNegRisk: boolean = false
 ): RankedMarketByEarnings[] {
   return markets
     .map((market) => ({
@@ -145,7 +153,9 @@ export function rankMarketsByEarnings(
       (m) =>
         m.earningPotential.compatible &&
         m.earningPotential.estimatedDailyEarnings > 0 &&
-        !m.negRisk // Skip NegRisk markets due to signature compatibility issues
+        // Keep market if: (1) NegRisk allowed OR (2) market is not NegRisk
+        // This filters out NegRisk markets only when excludeNegRisk=true
+        (!excludeNegRisk || !m.negRisk)
     )
     .sort(
       (a, b) =>
@@ -281,7 +291,8 @@ export async function discoverMarkets(
   // Rank by earnings
   let rankedMarkets = rankMarketsByEarnings(
     marketsWithRealCompetition,
-    liquidity
+    liquidity,
+    options.excludeNegRisk ?? false
   );
 
   // Apply limit if specified
@@ -342,6 +353,7 @@ export async function findBestMarket(
     skipCompetitionFetch: options.skipCompetitionFetch,
     onFetchProgress: options.onFetchProgress,
     onCompetitionProgress: options.onCompetitionProgress,
+    excludeNegRisk: options.excludeNegRisk ?? false,
     liquidity,
   });
 
