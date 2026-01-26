@@ -677,6 +677,22 @@ Automatic market selection and switching orchestrator.
 - Finding a better market TRIGGERS the pending switch flag
 - Switch executes only when BOTH: pending switch exists AND position is neutral
 
+**Pending Switch Detection:**
+The orchestrator checks for pending switch at multiple checkpoints to ensure timely execution:
+1. **After each fill** - When trades occur and position changes
+2. **After merge operations** - When neutral tokens are merged to USDC
+3. **After each rebalance** - At the end of every rebalance cycle
+4. **Periodic timer** - Every 10 seconds, independent of activity
+
+This multi-checkpoint approach ensures the switch executes promptly when position becomes neutral,
+even in low-activity markets or when starting with a neutral position.
+
+**Shutdown Handling:**
+- The orchestrator does NOT register its own SIGINT/SIGTERM handlers
+- The market maker's shutdown handler (registered in websocket.ts) handles Ctrl+C
+- This ensures orders are properly cancelled on both YES and NO tokens when exiting
+- The orchestrator detects shutdown via `state.running = false` and exits gracefully
+
 **Usage:**
 ```bash
 npm run orchestrate                          # Dry run, log switching decisions

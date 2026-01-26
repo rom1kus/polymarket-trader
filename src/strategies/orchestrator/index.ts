@@ -665,20 +665,6 @@ export async function runOrchestrator(config: OrchestratorConfig): Promise<void>
   // Re-evaluation timer handle
   let reEvalTimer: NodeJS.Timeout | null = null;
 
-  // Setup shutdown handling
-  let shutdownRequested = false;
-  const handleShutdown = () => {
-    if (shutdownRequested) {
-      log("\nForce shutdown...");
-      process.exit(1);
-    }
-    shutdownRequested = true;
-    state.running = false;
-    log("\n[Orchestrator] Shutdown requested, finishing current cycle...");
-  };
-  process.on("SIGINT", handleShutdown);
-  process.on("SIGTERM", handleShutdown);
-
   try {
     // Initialize client
     log("[Orchestrator] Initializing client...");
@@ -993,10 +979,6 @@ export async function runOrchestrator(config: OrchestratorConfig): Promise<void>
       };
       config.onEvent({ type: "shutdown", summary });
     }
-
-    // Cleanup
-    process.off("SIGINT", handleShutdown);
-    process.off("SIGTERM", handleShutdown);
   }
 }
 

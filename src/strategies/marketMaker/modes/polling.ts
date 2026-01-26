@@ -176,13 +176,19 @@ export async function runWithPolling(ctx: PollingRunnerContext): Promise<MarketM
           : "none";
         log(`  Quotes still valid (YES: ${yesInfo}, NO: ${noInfo})`);
       }
+      
+      // 8. Check if orchestrator wants to switch after rebalance
+      // This catches neutral positions even if no fills occurred
+      if (checkPendingSwitchAndMaybeExit()) {
+        break;
+      }
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       log(`  ERROR: ${errorMsg}`);
       state.lastError = errorMsg;
     }
 
-    // 8. Wait for next cycle
+    // 9. Wait for next cycle
     await sleep(config.refreshIntervalMs);
   }
 
