@@ -289,7 +289,12 @@ Gamma API utilities for fetching event and market metadata:
   - Uses cursor-based pagination (`nextCursor`) to fetch all markets from API
   - Applies early filtering (liquidity compatibility, minSize) during fetch to reduce memory usage
   - Supports `onProgress` callback for progress reporting
-  - **NegRisk handling:** Reads `neg_risk` field from rewards API response (defaults to `false` if not present)
+  - **NegRisk handling:** Reads `neg_risk` field from rewards API (note: may be stale/incorrect)
+- `enrichMarketNegRisk(market, fetcher?)` - **CRITICAL:** Fetches correct `negRisk` value from Gamma API
+  - The Rewards API has incorrect/stale `negRisk` data
+  - Gamma API is the authoritative source for `negRisk` (affects signature generation)
+  - Called automatically by `findBestMarket()` before returning selected market
+  - Must be called before creating orders for any market from Rewards API
 - `fetchMarketRewardsInfo(conditionIds, fetcher?)` - Fetches market competitiveness and rate_per_day
 
 #### `src/utils/markets.ts`
@@ -357,17 +362,22 @@ Market volatility detection utilities for filtering out dangerous markets:
 - `isMarketSafe(tokenId, thresholds, fetcher?)` - Determines if market passes volatility check
 - `checkMarketVolatility(tokenId, marketName, thresholds, fetcher?)` - With detailed logging
 
-**Purpose:** Prevents adverse selection by filtering out markets with excessive price movement (e.g., >10% in 10 minutes by default, conservative setting).
+**Purpose:** Prevents adverse selection by filtering out markets with excessive price movement (default: >10% in 60 minutes, conservative setting).
+
+**Implementation Status:** ✅ **COMPLETED (2026-01-21)** - Integrated into market discovery and orchestrator
 
 **How it works:**
 1. Fetches 1 hour of price history from CLOB `/prices-history` endpoint (public, no auth required)
-2. Analyzes recent window (default: 10 minutes)
+2. Analyzes recent window (default: 60 minutes, configurable)
 3. Filters out markets exceeding threshold (default: 10% change, conservative)
 4. Conservative approach: skips market on API failure
+5. Optimized top-first checking: only checks ranked candidates, not all markets
 
-**Used by:** Market discovery to proactively filter volatile markets before entering
+**Used by:** Market discovery (`findBestMarket`) and orchestrator to proactively filter volatile markets before entering
 
-**Configuration:** See `volatilityFilter` in orchestrator config
+**Configuration:** See `volatilityFilter` in orchestrator config. CLI flags: `--max-volatility`, `--volatility-lookback`, `--no-volatility-filter`
+
+**Real-world validation:** Would have prevented -$22.70 loss from 2026-01-21 session (31% market move in 4 minutes)
 
 #### `src/utils/marketDiscovery.ts`
 Market discovery utilities for finding and ranking markets by earning potential:
@@ -963,10 +973,26 @@ NegRisk markets are multi-outcome markets that require special handling:
 - The `negRisk` parameter determines which exchange contract is used for EIP-712 signatures
 - Using the wrong value causes "invalid signature" errors from the CLOB API
 
-### Detection
-- The `negRisk` flag is read from Gamma API's `neg_risk` field
-- All market discovery functions properly read and preserve this flag
-- The orchestrator uses the correct `negRisk` value when creating market configs
+### Detection and Data Enrichment
+- **IMPORTANT**: The Rewards API has **incorrect/stale** `negRisk` data
+- The Gamma API is the **authoritative source** for `negRisk` values
+- `enrichMarketNegRisk()` in `gamma.ts` fetches correct values from Gamma API
+- Market discovery automatically enriches the selected market before returning it
+- **DO NOT** place orders without enriching `negRisk` first - will cause signature errors
+
+### API Data Sources
+| API | Endpoint | negRisk Accuracy | Use Case |
+|-----|----------|------------------|----------|
+| Rewards API | `/api/rewards/markets` | ❌ Incorrect/stale | Market discovery, reward data |
+| Gamma API | `/gamma-api.polymarket.com/markets` | ✅ Authoritative | negRisk validation before trading |
+
+### Data Flow
+```
+1. fetchMarketsWithRewards() → Rewards API → negRisk may be wrong ❌
+2. findBestMarket() → enrichMarketNegRisk() → Gamma API → negRisk corrected ✅
+3. createConfigForMarket() → uses corrected negRisk ✅
+4. placeOrder() → signatures use correct exchange contract ✅
+```
 
 ### Filtering
 - By default, NegRisk markets are **allowed** in market discovery
@@ -986,4 +1012,4 @@ NegRisk markets are multi-outcome markets that require special handling:
 - NegRisk Adapter: `0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296`
 
 ---
-*Last updated: 2026-01-26 - Added full NegRisk market support with optional filtering*
+*Last updated: 2026-01-26 - Fixed negRisk data enrichment from Gamma API*

@@ -66,7 +66,15 @@ Fix before next production run.
   - [ ] Cooldown period before resuming
 
 ### Market Volatility Protection
-- [ ] Volatility filter (pause when price swings exceed threshold)
+- [x] Volatility filter ✅ **IMPLEMENTED (2026-01-21)**
+  - [x] Price history fetching from CLOB `/prices-history` endpoint
+  - [x] Volatility metrics calculation (% change, max move over lookback window)
+  - [x] Configurable thresholds (default: 10% in 60 min - conservative)
+  - [x] Integration with market discovery (`findBestMarket`)
+  - [x] Optimized top-first checking (only checks ranked candidates)
+  - [x] CLI flags: `--max-volatility`, `--volatility-lookback`, `--no-volatility-filter`
+  - [x] Conservative failure handling (skip market if API fails)
+- [ ] Runtime volatility monitoring (detect during active trading session)
 - [ ] Trend detection (don't quote into trending markets)
 - [ ] Dynamic spread widening during high volatility
 
@@ -134,7 +142,59 @@ Fix before next production run.
 
 ---
 
-## Lessons Learned (2026-01-16 Production Run)
+## Lessons Learned
+
+### Adverse Selection Case Study (2026-01-21)
+
+**What happened:** Bot suffered -$22.70 loss (-17.16% ROI) in 4 minutes due to adverse selection in highly volatile market.
+
+**Market conditions:**
+- Event: "Will Zelenskyy attend the World Economic Forum?"
+- Duration: 4 minutes (15:05-15:09)
+- Volatility: 31% price move ($0.58 → $0.76, 18-cent swing)
+
+**Trading pattern (Classic Adverse Selection):**
+- 14 fills total: 7 YES buys (120 tokens @ $0.6899), 7 NO buys (140 tokens @ $0.4057)
+- BUY NO @ $0.40 = effectively SELL YES @ $0.60
+- When market LOW: Bought YES cheap ✅, but sold YES cheap (via BUY NO) ❌
+- When market HIGH: Bought YES expensive ❌, but sold YES well (via BUY NO) ✅
+- **Result**: Bought high, sold low → -$0.0956 per pair
+
+**Root cause:** 31% volatility in 4 minutes is extreme. Against 18-cent moves:
+- No reasonable spread provides protection (1.5c buffer vs 18c move = 8% coverage)
+- Informed traders know news before price fully adjusts
+- Our orders stay live during rapid price changes = toxic order flow
+- Position limits hit (blocked one side) but actually prevented 5x worse loss
+
+**What made it worse:**
+1. **No volatility detection** - Bot couldn't detect/avoid dangerous markets
+2. **Rebalance threshold** - 0.5c threshold too wide for 18c moves
+3. **No stop-loss** - No mechanism to cut losses when P&L deteriorated
+
+**Solutions implemented:**
+- ✅ **Volatility filter (COMPLETED 2026-01-21)** - Would have prevented entire loss by detecting 31% move and never entering market
+
+**Solutions still needed:**
+- ⚠️ **Stop-loss (Phase 3)** - Would have limited loss to ~-$10 instead of -$22.70 (56% reduction)
+- ⚠️ **Inventory-skewed quoting (Phase 2)** - Would prevent getting stuck one-sided in trending markets
+
+**Key learnings:**
+1. **Two-sided market making works correctly** - BUY NO truly equals SELL YES, no bugs in logic
+2. **Adverse selection is not a bug, it's market conditions** - No parameter tuning can fix 31% moves
+3. **Position limits are protection** - Lower limits prevented 5x worse loss. Don't increase them.
+4. **Parameter tweaks are marginal** - Wider spreads only help ~3% against 31% volatility
+5. **Real solution**: Avoid volatile markets (filter), cut losses early (stop-loss)
+
+**Strategic question:** Market making is profitable when:
+```
+Liquidity Rewards > (Adverse Selection Costs + Gas Fees + Opportunity Cost)
+```
+
+**Validation needed:** Run 24-hour test with volatility filter + stop-loss enabled. Measure net profit to determine if strategy is fundamentally viable on Polymarket.
+
+---
+
+### 2026-01-16 Production Run
 
 **What happened:** Bot running in USDC-only mode with position limit ±10. A single fill 
 of 20 NO @ $0.52 immediately hit 200% of the position limit (net exposure -20). Bot 
@@ -164,7 +224,7 @@ correctly blocked further NO purchases and went single-sided, only quoting YES.
 
 ---
 
-## Lessons Learned (2024-12-29 Production Run)
+### 2024-12-29 Production Run
 
 **What happened:** Bot started with USDC only. Could only BUY (SELL failed). Market rose $0.44 -> $0.55 (buys filled around $0.53). Market then crashed to $0.32. Bot now had tokens but no USDC, so it could only SELL - liquidating the position around $0.35. Lost ~$0.18/share.
 
@@ -175,7 +235,7 @@ correctly blocked further NO purchases and went single-sided, only quoting YES.
 
 ---
 
-*Last updated: 2026-01-16 - Added implementation phases for P&L tracking, inventory skewing, and stop-loss*
+*Last updated: 2026-01-26 - Integrated adverse selection case study, updated volatility filter status*
 
 ---
 
@@ -328,6 +388,10 @@ interface InventorySkewConfig {
 
 ### Phase 3: Stop-Loss with Position Liquidation
 **Priority: HIGH | Effort: Medium | Impact: High**
+**Status: NOT IMPLEMENTED** ⚠️ **URGENT - NEEDED FOR PRODUCTION**
+
+**Real-world impact:** 2026-01-21 adverse selection case study showed -$22.70 loss in 4 minutes. 
+Stop-loss with -$10 threshold would have limited loss by 56% (-$10 vs -$22.70).
 
 **Problem:** No mechanism to cut losses when market moves against our position.
 Without stop-loss, a market maker can hold a losing position until market resolution,
