@@ -693,6 +693,15 @@ even in low-activity markets or when starting with a neutral position.
 - This ensures orders are properly cancelled on both YES and NO tokens when exiting
 - The orchestrator detects shutdown via `state.running = false` and exits gracefully
 
+**Market Switching:**
+When the orchestrator switches from one market to another:
+1. Market maker exits with reason "neutral"
+2. Orchestrator cancels all orders on the OLD market (both YES and NO tokens)
+3. Orchestrator updates state to the NEW market
+4. Market maker starts on the NEW market with fresh orders
+
+This ensures no orders are left behind on old markets during switches.
+
 **Usage:**
 ```bash
 npm run orchestrate                          # Dry run, log switching decisions

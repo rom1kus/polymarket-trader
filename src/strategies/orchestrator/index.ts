@@ -22,6 +22,7 @@
 import { createAuthenticatedClobClient } from "@/utils/authClient.js";
 import { log, formatDuration, promptForInput } from "@/utils/helpers.js";
 import { getUsdcBalance } from "@/utils/balance.js";
+import { cancelOrdersForToken } from "@/utils/orders.js";
 import { findBestMarket, discoverMarkets, type RankedMarketByEarnings } from "@/utils/marketDiscovery.js";
 import { generateMarketConfig, formatMarketConfig } from "@/utils/marketConfigGenerator.js";
 import { calculateActualEarnings } from "@/utils/rewards.js";
@@ -893,6 +894,23 @@ export async function runOrchestrator(config: OrchestratorConfig): Promise<void>
               const targetMarket = pendingSwitch.targetMarket;
               
               log(`[Orchestrator] Executing pending switch to: ${targetMarket.question}`);
+              
+              // CRITICAL: Cancel all orders from the old market before switching
+              if (state.currentMarket && !config.dryRun) {
+                try {
+                  log(`[Orchestrator] Cancelling orders on old market...`);
+                  await Promise.all([
+                    cancelOrdersForToken(client, state.currentConfig!.market.yesTokenId),
+                    cancelOrdersForToken(client, state.currentConfig!.market.noTokenId),
+                  ]);
+                  log(`[Orchestrator] Old market orders cancelled (YES + NO)`);
+                } catch (error) {
+                  log(`[Orchestrator] Warning: Failed to cancel old orders: ${error}`);
+                  // Continue anyway - better to switch than to get stuck
+                }
+              } else if (config.dryRun) {
+                log(`[Orchestrator] [DRY RUN] Would cancel orders on old market`);
+              }
               
               if (config.onEvent && state.currentMarket) {
                 config.onEvent({
