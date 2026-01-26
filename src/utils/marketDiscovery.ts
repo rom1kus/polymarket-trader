@@ -27,6 +27,7 @@
 
 import {
   fetchMarketsWithRewards,
+  enrichMarketNegRisk,
   type FetchMarketsWithRewardsOptions,
 } from "@/utils/gamma.js";
 import type {
@@ -341,7 +342,14 @@ export async function findBestMarket(
       liquidity,
       limit: 1,
     });
-    return result.markets[0] ?? null;
+    const bestMarket = result.markets[0] ?? null;
+    
+    // CRITICAL: Enrich with correct negRisk from Gamma API
+    if (bestMarket) {
+      await enrichMarketNegRisk(bestMarket);
+    }
+    
+    return bestMarket;
   }
 
   // Optimized approach: rank first, then check volatility iteratively
@@ -392,6 +400,11 @@ export async function findBestMarket(
 
     if (isSafe) {
       log(`[Discovery] Found safe market after checking ${checked} candidates (${filtered} filtered)`);
+      
+      // CRITICAL: Enrich with correct negRisk from Gamma API
+      // The Rewards API has incorrect/stale negRisk data, which causes signature errors
+      await enrichMarketNegRisk(market);
+      
       return market;
     }
 
