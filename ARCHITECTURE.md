@@ -20,7 +20,8 @@ polymarket-trader/
 │       ├── market-maker-roadmap.md # Market maker future enhancements
 │       └── orchestrator.md         # Orchestrator documentation (auto market selection)
 ├── data/                 # Trading history data (auto-generated)
-│   └── fills-*.json      # Position tracking and fill history per market
+│   ├── fills-*.json      # Position tracking and fill history per market
+│   └── liquidations.json # Markets currently in liquidation mode (orchestrator)
 ├── src/
 │   ├── config/           # Application configuration
 │   │   ├── index.ts      # CLOB and Gamma API hosts, chain settings
@@ -504,14 +505,16 @@ Orchestrator state management for detecting existing positions on restart:
 - `printPositionsSummary(positions)` - Prints summary of all detected positions
 
 **Purpose:** Prevents capital fragmentation on orchestrator restart. When restarting, the orchestrator
-scans for existing non-neutral positions and prompts to resume them (or auto-resumes with `--auto-resume`).
-This ensures you don't accidentally start trading a new market while stuck with positions in another.
+scans for existing non-neutral positions and handles them appropriately:
+- Positions already marked in `./data/liquidations.json` are automatically restored to the liquidation queue
+- Other non-neutral positions are queued for liquidation (prompted in supervised mode, automatic with `--auto-resume`)
+This ensures you don't accidentally start trading a new market while stuck with positions in others.
 
 **Detection Process:**
 1. Scans all `./data/fills-*.json` files for known markets
 2. Verifies on-chain balances for ground truth
-3. Prioritizes market with largest net exposure
-4. Prompts user to resume (supervised) or auto-resumes (24/7 mode)
+3. Separates liquidation vs active positions using `./data/liquidations.json`
+4. Restores liquidations automatically; prompts or auto-queues other positions for liquidation
 
 **Dust Threshold:** Balances below 0.1 tokens are considered negligible and ignored.
 
@@ -656,9 +659,10 @@ Automatic market selection and switching orchestrator.
 6. When position becomes neutral AND pending switch exists, executing the switch
 
 **Files:**
-- `index.ts` - Main orchestrator loop, CLI entry point, position resume logic
+- `index.ts` - Main orchestrator loop, CLI entry point, position resume logic, dual-market operation
 - `config.ts` - Orchestrator configuration (`OrchestratorConfig`, defaults, CLI parsing)
-- `types.ts` - Orchestrator types (`OrchestratorState`, `PendingSwitch`, `SwitchDecision`, events)
+- `types.ts` - Orchestrator types (`OrchestratorState`, `PendingSwitch`, `SwitchDecision`, `LiquidationMarket`, events)
+- `liquidation.ts` - Liquidation management for passive position exit
 
 **Key Features:**
 - Uses `findBestMarket()` from `@/utils/marketDiscovery.ts`
@@ -678,6 +682,11 @@ Automatic market selection and switching orchestrator.
 - Configurable switching threshold (default 20% improvement required)
 - Log-only mode for safe testing (default: no real switching)
 - Session summary with cumulative stats on shutdown
+- **Phase 4 - Dual-Market Operation** (NEW): Simultaneous active market making + passive liquidation
+  - Position limit detection triggers liquidation handoff
+  - Active market continues full market making
+  - Liquidation markets passively exit positions in parallel
+  - Markets in liquidation are excluded from best market selection
 
 **Switching Logic:**
 - Uses **actual earnings** from placed orders when available (not just estimates)
@@ -686,6 +695,68 @@ Automatic market selection and switching orchestrator.
 - Neutral position ENABLES switching but doesn't TRIGGER it
 - Finding a better market TRIGGERS the pending switch flag
 - Switch executes only when BOTH: pending switch exists AND position is neutral
+
+**Phase 4: Dual-Market Operation (Position Limit Handling):**
+
+**Position Limit Trigger:** The market maker exits to liquidation mode when ANY side is blocked by position limits AND the position is non-neutral (abs(net exposure) > 0.1). This ensures immediate handoff to liquidation rather than waiting for both sides to be blocked.
+
+When the active market hits position limits, the orchestrator:
+
+1. **Moves market to liquidation queue:**
+   - Creates `LiquidationMarket` with position tracker and config
+   - Starts in PASSIVE stage (quote at midpoint to exit)
+   - Stores active order ID and last midpoint for reference
+
+2. **Finds new active market:**
+   - Excludes markets currently in liquidation (`excludeConditionIds`)
+   - Ranks remaining markets by earning potential
+   - Switches to new best market immediately
+
+3. **Manages liquidations in parallel:**
+   - Every 30 seconds, checks all liquidation markets
+   - Places passive exit orders using in-memory `PositionTracker` state (no per-cycle on-chain balance reconciliation)
+   - Removes markets when position becomes neutral (< 0.1 exposure based on tracker)
+
+- **Liquidation Stages (MVP: PASSIVE only):**
+- `PASSIVE` - Profit-protected liquidation using SELL orders with avg-cost floor (current implementation)
+  - **Sell-to-close approach:** If long YES, SELL YES tokens; if long NO, SELL NO tokens
+  - **Target price calculation:** Desired price is midpoint (for YES) or (1 - midpoint) (for NO)
+  - **Profit protection floor:** Target price is floored at average cost: `targetPrice = max(desiredPrice, avgCost)`
+  - This prevents locking in losses by never selling below cost basis
+  - When market price is unfavorable (below cost), places opportunistic order AT cost (captures fills if market recovers)
+  - When market price is favorable (at/above cost), places order at midpoint for quick exit
+  - Order replacement threshold: 0.5 cents price change triggers cancel/replace
+  - Note: `calculateMaxBuyPrice()` exists (computes break-even ceiling for hypothetical buy-to-close) but is not currently used by liquidation quoting logic
+- `SKEWED` - Quote slightly above/below midpoint to incentivize fills (future)
+- `AGGRESSIVE` - Larger price concessions (future)
+- `MARKET` - Immediate exit at any price (future)
+
+**Architecture:**
+```
+Active Market (Market A)
+  ├─ Full market making with position limits
+  └─ On position_limit → move to liquidation queue
+
+Liquidation Queue (Markets B, C, D...)
+  ├─ Market B: PASSIVE liquidation (quote at midpoint)
+  ├─ Market C: PASSIVE liquidation (quote at midpoint)
+  └─ (Removed when position becomes neutral)
+
+New Active Market (Market E)
+  └─ Full market making continues
+```
+
+**Key Design Decisions:**
+- **Persisted state handoff:** `PositionTracker` is passed directly (not recreated) for seamless transition
+- **No WebSocket for liquidation:** Relies on in-memory tracker state and periodic management (no per-cycle on-chain balance reconciliation)
+- **Entire position size:** Liquidation orders close full position at once (not gradual)
+- **Neutral threshold:** < 0.1 shares considered neutral (completes liquidation)
+- **30-second interval:** Balance of responsiveness vs API rate limits (liquidation timer only runs when `--enable-switching` is set)
+- **Profit protection:** Uses `PositionTracker` average cost to set price floor
+  - Never sells below cost basis (prevents locking in losses)
+  - When price unfavorable: Places opportunistic orders at cost basis
+  - When price favorable: Places orders at midpoint for quick exit
+  - Always has an order on the book to capture favorable price movements
 
 **Pending Switch Detection:**
 The orchestrator checks for pending switch at multiple checkpoints to ensure timely execution:

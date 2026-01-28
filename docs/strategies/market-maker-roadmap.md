@@ -9,11 +9,12 @@ Organized by **Impact** and **Effort**. Priority items directly prevent losses o
 
 ## High Priority (High Impact, Medium-High Effort)
 
-### Phase 4: Dual-Market Operation ⭐ **PRIMARY FOCUS**
-- [ ] Inventory-skewed quoting for liquidation markets
-- [ ] Stop-loss with position liquidation
-- [ ] Orchestrator for parallel active + liquidation markets
-- [ ] Profit-aware quoting (only exit if profitable)
+### Phase 4: Dual-Market Operation ⭐ **MVP COMPLETE, ENHANCEMENTS IN PROGRESS**
+- [x] Orchestrator for parallel active + liquidation markets (PASSIVE stage)
+- [x] Profit-aware quoting with avg-cost floor (prevents locking in losses)
+- [ ] Inventory-skewed quoting for liquidation markets (SKEWED stage)
+- [ ] Stop-loss with forced liquidation (MARKET stage)
+- [ ] Timeout escalation to AGGRESSIVE stage
 
 ### Market Volatility Protection
 - [ ] Runtime volatility monitoring (detect during active trading)

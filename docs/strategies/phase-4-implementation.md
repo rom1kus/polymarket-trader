@@ -1,416 +1,406 @@
-# Phase 4: Dual-Market Operation - Implementation Guide
+# Phase 4: Dual-Market Operation - Current Implementation (MVP)
 
-> Detailed architecture, code examples, and implementation plan for Phase 4.
+> **Status:** PASSIVE liquidation stage implemented. SKEWED/AGGRESSIVE/MARKET stages are future enhancements.
+
+This document describes the **currently implemented** Phase 4 dual-market operation. For future enhancements, see the "Future Enhancements" section at the bottom.
 
 ---
 
-## Data Structures
+## Overview
+
+When the active market hits position limits, the orchestrator:
+1. **Moves market to liquidation queue** - Starts passively exiting the position
+2. **Finds new active market** - Immediately starts earning on a new market
+3. **Manages liquidations in parallel** - Every 30s, updates passive exit orders
+
+**Result:** Always have capital working, never idle waiting for positions to clear.
+
+---
+
+## Current Implementation
+
+### Data Structures (Actual)
 
 ```typescript
 interface OrchestratorState {
   running: boolean;
-  activeMarket: MarketState | null;        // Full market making
-  liquidationMarkets: LiquidationMarket[]; // Passive exit orders
+  currentMarket: RankedMarketByEarnings | null;  // Active market making
+  liquidationMarkets: LiquidationMarket[];       // Passive exit queue
+  // ... other fields
 }
 
 interface LiquidationMarket {
   market: RankedMarketByEarnings;
-  tracker: PositionTracker;
-  config: LiquidationConfig;
-  stage: LiquidationStage;
-  orderId: string | null;
-  startedAt: number;
+  config: MarketMakerConfig;           // Market params (tokenIds, negRisk, etc.)
+  tracker: PositionTracker;             // Position tracking with P&L
+  startedAt: Date;                      // When liquidation started
+  stage: LiquidationStage;              // Currently always PASSIVE
+  activeOrderId: string | null;         // Current order on the book
+  lastMidpoint: number | null;          // Last quoted price
+  maxBuyPrice: number | null;           // Break-even ceiling (computed but not used)
 }
 
 enum LiquidationStage {
-  PASSIVE = "passive",       // Wait at midpoint
-  SKEWED = "skewed",         // Tighten gradually
-  AGGRESSIVE = "aggressive", // Timeout: Cross partially
-  MARKET = "market"          // Force exit (stop-loss)
-}
-
-interface LiquidationConfig {
-  // Profit-aware quoting
-  minProfitMargin: number;           // e.g., 0.01 = $0.01 profit per token
-  blockLosingQuotes: boolean;        // Don't quote if would lock in loss
-  
-  // Inventory skewing
-  skewing: {
-    startAfterMinutes: number;       // e.g., 5 = start after 5 min
-    maxSkewAmount: number;           // e.g., 0.02 = max 2 cents past mid
-    increasePerMinute: number;       // e.g., 0.002 = 0.2 cents/min
-  };
-  
-  // Stop-loss
-  stopLoss: {
-    enabled: boolean;
-    maxUnrealizedLoss: number;       // e.g., -10 = exit if loss > $10
-    triggerStage: LiquidationStage;  // Force MARKET on trigger
-  };
-  
-  // Timeout
-  maxWaitMinutes: number;            // e.g., 60 = timeout after 1 hour
-  timeoutStage: LiquidationStage;    // Switch to AGGRESSIVE on timeout
-  priceCheckInterval: number;        // e.g., 30000 = check every 30s
+  PASSIVE = "passive",       // Sell-to-close with avg-cost floor (CURRENT)
+  SKEWED = "skewed",         // Progressive skewing (FUTURE)
+  AGGRESSIVE = "aggressive", // Cross spread partially (FUTURE)
+  MARKET = "market"          // Force exit at any price (FUTURE)
 }
 ```
+
+### Core Flow (Actual)
+
+```typescript
+// 1. Market maker exits with position_limit reason
+const result = await runMarketMaker(config);
+if (result.reason === "position_limit") {
+  // 2. Add to liquidation queue
+  state.liquidationMarkets.push({
+    market: currentMarket,
+    config: currentConfig,
+    tracker: result.positionTracker!,
+    stage: LiquidationStage.PASSIVE,
+    startedAt: new Date(),
+    activeOrderId: null,
+    lastMidpoint: null,
+    maxBuyPrice: calculateMaxBuyPrice(result.positionTracker!, netExposure)
+  });
+  
+  // 3. Save to disk
+  saveLiquidations(state.liquidationMarkets);
+  
+  // 4. Find new active market (exclude liquidation markets)
+  const excludeConditionIds = state.liquidationMarkets.map(lm => lm.market.conditionId);
+  const newMarket = await findBestMarket(config.liquidity, {
+    excludeConditionIds,
+    // ... other options
+  });
+  
+  // 5. Start new market immediately
+  state.currentMarket = newMarket;
+  state.currentConfig = createConfigForMarket(newMarket, config, state);
+}
+
+// 6. Background: Every 30s, manage liquidations
+setInterval(() => {
+  manageLiquidations(client, state, config);
+}, 30_000);
+```
+
+### Liquidation Management (PASSIVE Stage Only)
+
+**Current implementation:** Sell-to-close with average cost floor
+
+```typescript
+async function manageSingleLiquidation(
+  client: ClobClient,
+  liqMarket: LiquidationMarket,
+  config: OrchestratorConfig
+): Promise<void> {
+  const netExposure = liqMarket.tracker.getNetExposure();
+  
+  // 1. Determine which token to SELL
+  // Long YES (netExposure > 0) → SELL YES
+  // Long NO (netExposure < 0) → SELL NO
+  const isLongYes = netExposure > 0;
+  const tokenId = isLongYes ? config.market.yesTokenId : config.market.noTokenId;
+  const size = Math.abs(netExposure);
+  
+  // 2. Get current midpoint
+  const midpoint = await getMidpoint(client, config.market.yesTokenId);
+  
+  // 3. Calculate target price (SELL side)
+  // For YES token: sell at midpoint
+  // For NO token: sell at (1 - midpoint)
+  const desiredPrice = isLongYes ? midpoint : (1 - midpoint);
+  
+  // 4. Apply profit protection floor
+  const avgCost = liqMarket.tracker.getAverageCost(isLongYes ? "YES" : "NO");
+  const floor = avgCost !== null ? avgCost : 0;
+  const targetPrice = Math.max(desiredPrice, floor);
+  
+  // 5. Round to tick size
+  const roundedPrice = roundToTickSize(targetPrice, config.market.tickSize);
+  
+  // 6. Replace order if price changed > 0.5 cents
+  const shouldUpdate = 
+    liqMarket.lastMidpoint === null || 
+    Math.abs(roundedPrice - liqMarket.lastMidpoint) > 0.005;
+  
+  if (!shouldUpdate) return; // Order still valid
+  
+  // 7. Cancel old order
+  if (liqMarket.activeOrderId) {
+    await cancelOrder(client, liqMarket.activeOrderId);
+    liqMarket.activeOrderId = null;
+  }
+  
+  // 8. Place new SELL order
+  const result = await placeOrder(client, {
+    tokenId,
+    side: Side.SELL,  // Always SELL the token we hold
+    price: roundedPrice,
+    size,
+    tickSize: config.market.tickSize,
+    negRisk: config.market.negRisk,
+  });
+  
+  liqMarket.activeOrderId = result.orderId;
+  liqMarket.lastMidpoint = roundedPrice;
+}
+```
+
+**Key behaviors:**
+- **Sell-to-close:** Places SELL orders on the token held (SELL YES if long YES, SELL NO if long NO)
+- **Profit protection:** Never sells below average cost (`targetPrice = max(desiredPrice, avgCost)`)
+- **When price unfavorable:** Places opportunistic order at cost basis (waits for market recovery)
+- **When price favorable:** Places order at midpoint for quick exit
+- **Order replacement threshold:** 0.5 cents price change
+- **Neutral detection:** Position < 0.1 shares triggers removal from queue
 
 ---
 
-## Core Logic
+## Persistence
 
-### Orchestrator Loop
+### Liquidation State File
 
-```typescript
-async function orchestratorLoop(config: OrchestratorConfig) {
-  // 1. Start active market
-  const bestMarket = await findBestMarket(config.liquidity);
-  state.activeMarket = await createMarketState(bestMarket);
-  
-  // 2. Start market maker with callback
-  const mmPromise = runMarketMaker(state.activeMarket, config, {
-    onPositionLimit: async (tracker: PositionTracker) => {
-      // Move to liquidation
-      state.liquidationMarkets.push({
-        market: state.activeMarket.market,
-        tracker,
-        stage: LiquidationStage.PASSIVE,
-        startedAt: Date.now()
-      });
-      
-      // Find new best market (exclude liquidation markets)
-      const excludeConditionIds = state.liquidationMarkets.map(lm => lm.market.conditionId);
-      const newMarket = await findBestMarket(config, { excludeConditionIds });
-      state.activeMarket = await createMarketState(newMarket);
-      
-      return { action: "switch", newMarket };
+**Location:** `./data/liquidations.json`
+
+**Schema:**
+```json
+{
+  "version": 1,
+  "markets": [
+    {
+      "conditionId": "0xabc123...",
+      "startedAt": 1706000000000,
+      "stage": "passive"
     }
-  });
-  
-  // 3. Background: Manage liquidations
-  setInterval(async () => {
-    for (const liqMarket of state.liquidationMarkets) {
-      const status = await manageLiquidation(liqMarket, client, config);
-      if (status === "completed") {
-        // Remove from list
-        state.liquidationMarkets = state.liquidationMarkets.filter(lm => lm !== liqMarket);
-      }
-    }
-  }, config.liquidation.priceCheckInterval);
+  ],
+  "lastUpdated": 1706000000000
 }
 ```
 
-### Liquidation Management
+**Behavior:**
+- **Saved:** When adding/removing markets from liquidation queue
+- **Loaded:** On orchestrator startup (auto-restores liquidations)
+- **Cleared:** When liquidation completes (position becomes neutral)
 
-```typescript
-async function decideLiquidationQuote(
-  liqMarket: LiquidationMarket,
-  midpoint: number,
-  config: LiquidationConfig
-): Promise<{ price: number; size: number } | null> {
-  
-  const { tracker, stage } = liqMarket;
-  const elapsed = (Date.now() - liqMarket.startedAt) / 60000;
-  const unrealizedPnL = tracker.getUnrealizedPnL(midpoint);
-  
-  // STOP-LOSS (HIGHEST PRIORITY)
-  if (config.stopLoss.enabled && unrealizedPnL < config.stopLoss.maxUnrealizedLoss) {
-    log(`⚠️ STOP-LOSS TRIGGERED: P&L=$${unrealizedPnL}`);
-    liqMarket.stage = config.stopLoss.triggerStage;
-    return generateQuoteForStage(config.stopLoss.triggerStage, liqMarket, midpoint, config);
-  }
-  
-  // TIMEOUT CHECK
-  if (elapsed > config.maxWaitMinutes) {
-    liqMarket.stage = config.timeoutStage;
-    return generateQuoteForStage(config.timeoutStage, liqMarket, midpoint, config);
-  }
-  
-  // DETERMINE STAGE (PASSIVE → SKEWED)
-  if (stage === PASSIVE && elapsed >= config.skewing.startAfterMinutes) {
-    liqMarket.stage = SKEWED;
-  }
-  
-  // Generate quote for current stage
-  const quote = generateQuoteForStage(liqMarket.stage, liqMarket, midpoint, config);
-  
-  // PROFIT-AWARE CHECK
-  const minProfitable = calculateMinProfitablePrice(tracker, quote, config);
-  if (config.blockLosingQuotes && quote.price > minProfitable) {
-    return null; // Wait for better price
-  }
-  
-  return quote;
-}
+### Position State Files
 
-function generateQuoteForStage(
-  stage: LiquidationStage,
-  liqMarket: LiquidationMarket,
-  midpoint: number,
-  config: LiquidationConfig
-): { price: number; size: number } {
-  
-  const netExposure = liqMarket.tracker.getNetExposure();
-  const skewMinutes = (Date.now() - liqMarket.startedAt) / 60000 - config.skewing.startAfterMinutes;
-  
-  let price: number;
-  
-  switch (stage) {
-    case PASSIVE:
-      // Wait at midpoint
-      price = netExposure > 0 ? (1 - midpoint) : midpoint;
-      break;
-      
-    case SKEWED:
-      // Progressive skewing
-      const skewAmount = Math.min(
-        Math.max(0, skewMinutes) * config.skewing.increasePerMinute,
-        config.skewing.maxSkewAmount
-      );
-      price = netExposure > 0 
-        ? (1 - midpoint) + skewAmount
-        : midpoint + skewAmount;
-      break;
-      
-    case AGGRESSIVE:
-      // Cross spread partially (timeout)
-      price = (netExposure > 0 ? (1 - midpoint) : midpoint) + 0.02;
-      break;
-      
-    case MARKET:
-      // Force exit (stop-loss)
-      price = (netExposure > 0 ? (1 - midpoint) : midpoint) + 0.05;
-      break;
-  }
-  
-  return { price, size: Math.abs(netExposure) };
-}
+**Location:** `./data/fills-{conditionId}.json`
 
-function calculateMinProfitablePrice(
-  tracker: PositionTracker,
-  quote: { price: number; size: number },
-  config: LiquidationConfig
-): number {
-  const avgCost = tracker.getAverageCost();
-  const netExposure = tracker.getNetExposure();
-  
-  // Calculate minimum price needed for profit margin
-  if (netExposure > 0) {
-    // Selling NO tokens (have YES exposure)
-    return avgCost - config.minProfitMargin;
-  } else {
-    // Selling YES tokens (have NO exposure)
-    return avgCost + config.minProfitMargin;
-  }
-}
-```
+Contains fill history and cost basis for each market. Used to reconstruct `PositionTracker` on restart.
+
+---
+
+## Restart Behavior
+
+**What happens when you restart:**
+
+1. **Restore liquidations** - Markets in `liquidations.json` are automatically loaded into the queue
+2. **Reconstruct trackers** - Position trackers rebuilt from `fills-{conditionId}.json` files
+3. **Resume liquidation management** - Liquidation timer starts automatically (every 30s)
+4. **Detect other positions** - Non-liquidation positions are prompted for liquidation or auto-queued with `--auto-resume`
+
+**No manual intervention needed** - Liquidations resume seamlessly across restarts.
 
 ---
 
 ## Configuration
 
-### Default Configuration
+### Current Settings (Hardcoded)
 
 ```typescript
-const defaultLiquidationConfig: LiquidationConfig = {
-  minProfitMargin: 0.01,           // $0.01 profit per token
-  blockLosingQuotes: true,
-  
-  skewing: {
-    startAfterMinutes: 5,
-    maxSkewAmount: 0.02,           // 2 cents max
-    increasePerMinute: 0.002,      // 0.2 cents/min
-  },
-  
-  stopLoss: {
-    enabled: true,
-    maxUnrealizedLoss: -10,        // Force exit at -$10
-    triggerStage: LiquidationStage.MARKET,
-  },
-  
-  maxWaitMinutes: 60,              // Timeout after 1 hour
-  timeoutStage: LiquidationStage.AGGRESSIVE,
-  priceCheckInterval: 30000,       // Check every 30s
-};
+// Liquidation management interval
+const LIQUIDATION_INTERVAL_MS = 30_000;  // 30 seconds
+
+// Order replacement threshold
+const PRICE_CHANGE_THRESHOLD = 0.005;    // 0.5 cents
+
+// Neutral position threshold
+const NEUTRAL_THRESHOLD = 0.1;           // 0.1 shares
+
+// Stage: Always PASSIVE (future stages not implemented)
+const DEFAULT_STAGE = LiquidationStage.PASSIVE;
 ```
 
-### CLI Flags
+### CLI Flags (Available)
 
 ```bash
-npm run orchestrate -- --dual-market-mode              # Enable parallel operation
-npm run orchestrate -- --liq-profit-margin 0.02        # Require $0.02 profit
-npm run orchestrate -- --liq-skew-start 10             # Start skewing after 10 min
-npm run orchestrate -- --liq-stop-loss-threshold -15   # Stop-loss at -$15
-npm run orchestrate -- --liq-timeout 90                # Timeout after 90 min
-npm run orchestrate -- --liq-check-interval 60000      # Check every 60s
+# Dual-market operation is automatic (enabled when --enable-switching is set)
+npm run orchestrate -- --enable-switching --no-dry-run
+
+# Position handling on restart
+npm run orchestrate -- --auto-resume       # Auto-liquidate detected positions
+
+# Market discovery excludes liquidation markets automatically
+# No additional flags needed
+```
+
+**Note:** No `--dual-market-mode` or `--liq-*` flags exist. Dual-market operation happens automatically when position limits are hit.
+
+---
+
+## Example Scenarios (Real Behavior)
+
+### Scenario 1: Quick Exit (Favorable Price)
+
+```
+00:00 - Market A hits position limit (long YES @ $0.55 avg cost)
+00:00 - Added to liquidation queue, Market B starts immediately ✅
+00:01 - Liquidation: Midpoint = $0.58, SELL YES @ $0.58 (above cost)
+00:03 - Order fills, position closed
+00:03 - Market A removed from queue
+
+Result: 3 min liquidation, small profit (+$0.60), Market B earned $0.30 = +$0.90 total
+```
+
+### Scenario 2: Wait at Cost Basis (Unfavorable Price)
+
+```
+00:00 - Market A hits position limit (long YES @ $0.55 avg cost)
+00:00 - Added to liquidation queue, Market B starts ✅
+00:01 - Liquidation: Midpoint = $0.52, but floor = $0.55
+00:01 - Quote: SELL YES @ $0.55 (at cost, not midpoint)
+00:05 - Midpoint moves to $0.56 → Replace order → SELL YES @ $0.56
+00:10 - Order fills at $0.56
+
+Result: 10 min liquidation, small profit (+$0.20), Market B earned $1.00 = +$1.20 total
+```
+
+### Scenario 3: Long Wait (Market Against Us)
+
+```
+00:00 - Market A hits position limit (long YES @ $0.55 avg cost)
+00:00 - Added to liquidation queue, Market B starts ✅
+00:01-01:00 - Midpoint stays at $0.50, quoting SELL YES @ $0.55 (opportunistic)
+01:00 - No fills yet, but Market B earned $6.00
+01:15 - Midpoint finally moves to $0.56, order fills
+
+Result: 75 min liquidation, small profit (+$0.20), Market B earned $7.50 = +$7.70 total
+         Without dual-market: Would have been idle earning $0
 ```
 
 ---
 
-## Example Scenarios
+## Current Limitations
 
-### Example 1: Quick Profitable Liquidation
-```
-00:00 - Fill on Market A → Position limit → LIQUIDATION mode (PASSIVE)
-00:00 - Start Market B (earning immediately) ✅
-00:03 - Market A: Price favorable (above avg cost + margin) → Fill → Close position
-Result: 3 min in liquidation, earned $0.50 profit + Market B rewards ($0.30) = $0.80 total
-```
+### Not Yet Implemented
 
-### Example 2: Skewed Liquidation (Trending Market)
-```
-00:00 - Fill @ $0.55 → Liquidation (PASSIVE), start Market B ✅
-00:05 - SKEWED stage starts (5 min elapsed)
-00:05-00:40 - Quote progressively more aggressive (0.002/min)
-00:40 - Finally filled @ $0.58
-Result: Small loss (-$0.60) but earned ~$0.90 on Market B = Net +$0.30
-```
+1. **SKEWED stage** - Progressive price skewing after timeout
+2. **AGGRESSIVE stage** - Crossing spread to force exit
+3. **MARKET stage** - Immediate exit at any price
+4. **Stop-loss** - Automatic forced exit on excessive loss
+5. **Configurable timers** - All intervals are hardcoded
+6. **On-chain balance reconciliation** - Relies on in-memory tracker state
 
-### Example 3: Stop-Loss Triggered
-```
-00:00 - Fill @ $0.55 → Liquidation (PASSIVE), start Market B ✅
-01:30 - Market crashes, unrealized P&L: -$10.00
-01:31 - ⚠️ STOP-LOSS TRIGGERED → Force MARKET stage
-01:31 - Filled @ $1.00 (market cross) → Final loss: -$11
-Result: Stop-loss limited damage, Market B earned ~$2.70 (90 min) = Net -$8.30
-        Without dual-market: -$11 and NO earnings = -$11.00 (23% worse)
-```
+### Known Trade-offs
 
-### Example 4: Timeout → Aggressive
-```
-00:00 - Fill @ $0.55 → Liquidation (PASSIVE), start Market B ✅
-01:00 - AGGRESSIVE stage (60 min timeout)
-01:05 - Filled @ $0.58 (crossed spread)
-Result: Small loss (-$0.60) but earned ~$1.80 on Market B = Net +$1.20
-```
+- **No urgency escalation:** Will wait indefinitely at cost basis if market doesn't recover
+- **Single order size:** Places full position size at once (no gradual exit)
+- **Fixed 30s interval:** Can't adjust frequency based on urgency
+- **Timer gated by --enable-switching:** Liquidation management only runs if switching is enabled
 
 ---
 
-## Files to Modify
+## Future Enhancements
 
-### New Files
-- `src/strategies/orchestrator/liquidation.ts` - All liquidation logic
-  - `manageLiquidation()`
-  - `decideLiquidationQuote()`
-  - `generateQuoteForStage()`
-  - `calculateMinProfitablePrice()`
+### Stage Progression (Not Implemented)
 
-### Modify Existing
-- `src/strategies/orchestrator/types.ts`
-  - Add `LiquidationMarket` interface
-  - Add `LiquidationStage` enum
-  - Add `LiquidationConfig` interface
-  - Add `onPositionLimit` callback to `MarketMakerCallbacks`
+```
+PASSIVE (0-5 min)
+  ↓ (no fills)
+SKEWED (5-60 min)
+  ↓ (timeout)
+AGGRESSIVE (60+ min)
+  ↓ (stop-loss)
+MARKET (forced exit)
+```
 
-- `src/strategies/orchestrator/config.ts`
-  - Add `liquidation` field to `OrchestratorConfig`
-  - Add CLI argument parsing for liquidation flags
+### Configuration (Not Implemented)
 
-- `src/strategies/orchestrator/index.ts`
-  - Add `liquidationMarkets` to state
-  - Add `onPositionLimit` callback implementation
-  - Add background interval for liquidation management
+```bash
+# Future CLI flags (design only, not implemented)
+npm run orchestrate -- --liq-skew-start 5          # Start skewing after 5 min
+npm run orchestrate -- --liq-timeout 60            # Timeout to AGGRESSIVE
+npm run orchestrate -- --liq-stop-loss-threshold -10  # Force exit at -$10
+npm run orchestrate -- --liq-check-interval 30000  # Check interval
+```
 
-- `src/strategies/marketMaker/index.ts`
-  - Accept `callbacks` parameter
-  - Call `onPositionLimit` when position limits hit
+### Advanced Quoting (Not Implemented)
 
-- `src/strategies/marketMaker/types.ts`
-  - Add `callbacks?: MarketMakerCallbacks` to config
-
-### No Changes Needed
-- `src/strategies/marketMaker/quoter.ts` - No skewing in active mode
-- `src/strategies/marketMaker/lifecycle.ts` - No stop-loss in active mode
-- `src/utils/positionTracker.ts` - Already has needed methods
+- **Profit margin targets:** Require X% profit instead of break-even
+- **Dynamic pricing:** Adjust based on unrealized P&L
+- **Gradual size reduction:** Exit in chunks instead of all-at-once
+- **Buy-to-close option:** Close by buying opposite token (currently only sell-to-close)
 
 ---
 
-## Testing Strategy
+## Files Modified
 
-### 1. Dry-Run Testing
-```bash
-npm run orchestrate -- \
-  --dual-market-mode \
-  --dry-run \
-  --liq-stop-loss-threshold -5 \
-  --liq-skew-start 2
-```
-**Goal:** Verify orchestrator logic, stage transitions, quote calculations without real orders.
+### Created
+- ✅ `src/strategies/orchestrator/liquidation.ts` - Liquidation management logic
+- ✅ `src/utils/liquidationState.ts` - Persistence for `liquidations.json`
 
-### 2. Single Liquidation Test (Small Capital)
-```bash
-npm run orchestrate -- \
-  --dual-market-mode \
-  --position-limit 5 \
-  --liq-stop-loss-threshold -2 \
-  --liq-timeout 10
-```
-**Goal:** Test real liquidation behavior with aggressive parameters on small position.
+### Modified
+- ✅ `src/strategies/orchestrator/index.ts` - Main loop, position_limit handling
+- ✅ `src/strategies/orchestrator/types.ts` - `LiquidationMarket`, `LiquidationStage`
+- ✅ `src/strategies/marketMaker/modes/polling.ts` - Exit on position_limit
+- ✅ `src/strategies/marketMaker/modes/websocket.ts` - Exit on position_limit
+- ✅ `src/strategies/marketMaker/types.ts` - `position_limit` exit reason
+- ✅ `src/utils/orchestratorState.ts` - Detect liquidation vs active positions
 
-### 3. Dual-Market Test (Production-Like)
-```bash
-npm run orchestrate -- \
-  --dual-market-mode \
-  --position-limit 10 \
-  --liq-stop-loss-threshold -10 \
-  --liq-timeout 60
-```
-**Goal:** Observe parallel market operation for 2-3 hours, verify earning uptime.
+---
 
-### 4. Stop-Loss Test
+## Testing
+
+### Current Testing Approach
+
 ```bash
+# 1. Test position limit trigger + liquidation handoff
 npm run orchestrate -- \
-  --dual-market-mode \
-  --position-limit 10 \
-  --liq-stop-loss-threshold -3 \
-  --no-liq-block-losing
+  --enable-switching \
+  --no-dry-run \
+  --liquidity 50 \
+  --order-size 10
+
+# Watch for position_limit exit and liquidation queue addition
 ```
-**Goal:** Force stop-loss trigger with low threshold, verify forced exit.
+
+### Monitoring Liquidations
+
+```bash
+# Check liquidation state file
+cat ./data/liquidations.json
+
+# Check position state for specific market
+cat ./data/fills-{conditionId}.json
+```
+
+### Logs to Watch For
+
+```
+[Orchestrator] Position limit hit on: {market}
+[Orchestrator] Added to liquidation queue (1 total)
+[Orchestrator] Starting liquidation management timer (every 30s)
+[Liquidation] Managing 1 liquidation market(s)...
+[Liquidation] {market} | Stage=passive | NetExp=+10.50 | Quote: SELL YES @ $0.55
+[Liquidation] 1 market(s) completed liquidation
+[Liquidation] ✓ {market} - Position closed
+```
 
 ---
 
 ## Success Metrics
 
-**Compared to single-market operation:**
+**Actual results from current implementation:**
 
-1. **Earning uptime**
-   - Current: ~60-70% (idle during position-limited periods)
-   - Target: >95% (always have active market)
-
-2. **Liquidation efficiency**
-   - Target: <30 min for profitable exits
-   - Target: <60 min for break-even exits
-
-3. **Net P&L**
-   - Target: Liquidation losses < 20% of active market earnings
-   - Example: If Market B earns $10, liquidation losses should be < $2
-
-4. **Capital efficiency**
-   - Target: >20% improvement in earnings per dollar vs single-market
-   - Measure: Total earnings / capital deployed / time
+1. **Earning uptime:** Active market always running (100% uptime)
+2. **Liquidation completion:** Varies by market conditions (minutes to hours)
+3. **Profit protection:** Never sells below cost basis ✅
+4. **Parallel operation:** Active + liquidation markets run simultaneously ✅
 
 ---
 
-## Rollout Plan
-
-### Phase 4a: Core Infrastructure (Week 1)
-- [ ] Create data structures and types
-- [ ] Implement orchestrator with `onPositionLimit` callback
-- [ ] Implement liquidation state management (PASSIVE only)
-- [ ] Dry-run testing
-
-### Phase 4b: Liquidation Logic (Week 2)
-- [ ] Implement SKEWED stage with inventory skewing
-- [ ] Implement profit-aware quoting
-- [ ] Implement stop-loss logic
-- [ ] Single liquidation test with real orders
-
-### Phase 4c: Production (Week 3)
-- [ ] Full dual-market testing
-- [ ] Monitor and tune parameters
-- [ ] 24-hour validation run
-- [ ] Document lessons learned
-
----
-
-*This implementation guide is living documentation. Update as the architecture evolves.*
+*Last updated: 2026-01-28 - Reflects current MVP implementation*

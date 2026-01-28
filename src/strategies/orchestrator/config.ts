@@ -124,12 +124,19 @@ export interface OrchestratorConfig {
   dryRun: boolean;
 
   // =========================================================================
-  // Position Resume (Restart Protection)
+  // Position Handling (Restart Protection)
   // =========================================================================
 
   /**
-   * Automatically resume existing positions on restart without prompting.
-   * When false (default), prompts user to confirm resuming detected positions.
+   * Automatically liquidate detected non-liquidation positions without prompting.
+   * 
+   * On startup, if the orchestrator detects positions that are NOT already in
+   * liquidations.json, it will:
+   * - When false (default): Prompt user to choose liquidate/ignore for each position
+   * - When true: Automatically queue all detected positions for liquidation
+   * 
+   * After handling positions, the orchestrator discovers and starts a new active market.
+   * 
    * Set to true for fully automated 24/7 operation.
    * @default false
    */
@@ -246,7 +253,7 @@ export function createOrchestratorConfig(
  * - --exclude-negrisk: Exclude NegRisk markets from selection
  * - --enable-switching: Enable actual market switching
  * - --no-dry-run: Disable dry run (place real orders)
- * - --auto-resume: Automatically resume positions without prompting (for 24/7 mode)
+ * - --auto-resume: Auto-liquidate detected positions without prompting (for 24/7 mode)
  * - --ignore-positions: Force new market discovery even with open positions (dangerous)
  * - --check-positions-only: Only check and report positions, don't start
  *

@@ -193,6 +193,35 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<Mar
         if (state.activeQuotes.yesQuote) state.stats.ordersPlaced++;
         if (state.activeQuotes.noQuote) state.stats.ordersPlaced++;
         state.lastError = null;
+        
+        // Check if any side is blocked by position limits with non-neutral position
+        // If so, we should exit and let the orchestrator handle liquidation
+        if (positionTracker) {
+          const position = positionTracker.getPositionState();
+          const isNonNeutral = Math.abs(position.netExposure) > 0.1;
+          const anySideBlocked = !state.activeQuotes.yesQuote || !state.activeQuotes.noQuote;
+          
+          if (isNonNeutral && anySideBlocked) {
+            const blockedSides = [];
+            if (!state.activeQuotes.yesQuote) blockedSides.push("YES");
+            if (!state.activeQuotes.noQuote) blockedSides.push("NO");
+            
+            log("");
+            log("╔════════════════════════════════════════════════════════════════╗");
+            log("║  POSITION LIMIT HIT - Market making blocked                    ║");
+            log("╚════════════════════════════════════════════════════════════════╝");
+            log(`  Blocked sides: ${blockedSides.join(", ")}`);
+            log(`  Net Exposure: ${position.netExposure >= 0 ? '+' : ''}${position.netExposure.toFixed(2)}`);
+            log(`  Exiting market maker - let caller/orchestrator handle liquidation...`);
+            
+            exitReason = "position_limit";
+            state.running = false;
+            if (resolveMainLoop) {
+              resolveMainLoop();
+            }
+            return false; // Stop running
+          }
+        }
       } else {
         const yesInfo = state.activeQuotes.yesQuote
           ? `$${state.activeQuotes.yesQuote.price.toFixed(4)}`
@@ -472,6 +501,7 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<Mar
   return {
     reason: exitReason,
     finalPosition,
+    positionTracker: positionTracker ?? undefined,
     error: exitError,
     stats: state.stats,
   };

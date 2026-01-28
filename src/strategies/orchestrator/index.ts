@@ -22,7 +22,7 @@
 import { createAuthenticatedClobClient } from "@/utils/authClient.js";
 import { log, formatDuration, promptForInput } from "@/utils/helpers.js";
 import { getUsdcBalance } from "@/utils/balance.js";
-import { cancelOrdersForToken } from "@/utils/orders.js";
+import { cancelOrdersForToken, cancelOrder } from "@/utils/orders.js";
 import { findBestMarket, discoverMarkets, type RankedMarketByEarnings } from "@/utils/marketDiscovery.js";
 import { generateMarketConfig, formatMarketConfig } from "@/utils/marketConfigGenerator.js";
 import { calculateActualEarnings } from "@/utils/rewards.js";
@@ -34,8 +34,13 @@ import {
   detectExistingPositions,
   findPriorityMarket,
   printPositionsSummary,
+  promptPositionAction,
   type DetectedPosition,
 } from "@/utils/orchestratorState.js";
+import { saveLiquidations, clearLiquidations, loadLiquidations, type PersistedLiquidation } from "@/utils/liquidationState.js";
+import { loadMarketState } from "@/utils/storage.js";
+import { createPositionTracker } from "@/utils/positionTracker.js";
+import { manageLiquidations, calculateMaxBuyPrice } from "./liquidation.js";
 import type { ClobClient } from "@polymarket/clob-client";
 import type { MarketMakerResult, OrchestratableMarketMakerConfig, SessionStats } from "../marketMaker/types.js";
 import type {
@@ -45,7 +50,9 @@ import type {
   OrchestratorSessionSummary,
   OrchestratorEvent,
   PendingSwitch,
+  LiquidationMarket,
 } from "./types.js";
+import { LiquidationStage } from "./types.js";
 import type { OrchestratorConfig } from "./config.js";
 import {
   createOrchestratorConfig,
@@ -73,6 +80,7 @@ function createInitialState(): OrchestratorState {
     currentMarket: null,
     currentConfig: null,
     pendingSwitch: null,
+    liquidationMarkets: [],
     switchCount: 0,
     marketsVisited: [],
     startTime: new Date(),
@@ -96,6 +104,20 @@ function createInitialState(): OrchestratorState {
  */
 function setPhase(state: OrchestratorState, phase: OrchestratorPhase): void {
   state.phase = phase;
+}
+
+/**
+ * Saves current liquidation state to disk.
+ * Called whenever liquidation queue changes (add/remove markets).
+ */
+function saveLiquidationsState(state: OrchestratorState): void {
+  const persistedLiquidations: PersistedLiquidation[] = state.liquidationMarkets.map(lm => ({
+    conditionId: lm.market.conditionId,
+    startedAt: lm.startedAt.getTime(),
+    stage: lm.stage,
+  }));
+  
+  saveLiquidations(persistedLiquidations);
 }
 
 /**
@@ -280,6 +302,9 @@ function printSwitchDecision(decision: SwitchDecision, enableSwitching: boolean)
  */
 function printSessionSummary(state: OrchestratorState): void {
   const runtime = Date.now() - state.startTime.getTime();
+  const completedLiquidations = state.liquidationMarkets.filter(lm => 
+    Math.abs(lm.tracker.getNetExposure()) < 0.1
+  ).length;
 
   console.log("");
   console.log(SEPARATOR);
@@ -288,6 +313,7 @@ function printSessionSummary(state: OrchestratorState): void {
   console.log(`  Runtime:        ${formatDuration(runtime)}`);
   console.log(`  Markets:        ${state.marketsVisited.length} visited`);
   console.log(`  Switches:       ${state.switchCount}`);
+  console.log(`  Liquidations:   ${completedLiquidations} completed, ${state.liquidationMarkets.length} active`);
   console.log(`  Total Fills:    ${state.cumulativeStats.fillCount}`);
   console.log(`  Total Volume:   $${state.cumulativeStats.totalVolume.toFixed(2)}`);
   console.log(`  Total Merges:   ${state.cumulativeStats.mergeCount}`);
@@ -299,97 +325,8 @@ function printSessionSummary(state: OrchestratorState): void {
 }
 
 // =============================================================================
-// Market Resume Logic
+// Position Handling (Liquidation)
 // =============================================================================
-
-/**
- * Attempts to create a market config from a detected position.
- * Requires loading the full market data from discovery.
- *
- * @param position - Detected position to resume
- * @param orchestratorConfig - Orchestrator configuration
- * @param state - Orchestrator state
- * @returns Market maker config, or null if market data unavailable
- */
-async function createConfigFromPosition(
-  position: DetectedPosition,
-  orchestratorConfig: OrchestratorConfig,
-  state: OrchestratorState
-): Promise<OrchestratableMarketMakerConfig | null> {
-  try {
-    // We need to fetch the market's reward parameters to create proper config
-    // For now, we'll use discoverMarkets to find this specific market
-    log(`[Orchestrator] Loading market data for ${position.conditionId.substring(0, 18)}...`);
-
-    const result = await discoverMarkets({
-      maxMinSize: orchestratorConfig.orderSize,
-    });
-
-    const matchingMarket = result.markets.find((m) => m.conditionId === position.conditionId);
-
-    if (!matchingMarket) {
-      log(`[Orchestrator] Warning: Could not find market ${position.conditionId} in active rewards list`);
-      log(`[Orchestrator] Market may no longer have active rewards, or may have been delisted`);
-      return null;
-    }
-
-    // Create config using the discovered market
-    const config = createConfigForMarket(matchingMarket, orchestratorConfig, state);
-
-    return config;
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    log(`[Orchestrator] Error loading market data: ${msg}`);
-    return null;
-  }
-}
-
-/**
- * Prompts user to confirm resuming a detected position.
- *
- * @param position - Position to resume
- * @returns True if user confirms, false otherwise
- */
-async function promptResumePosition(position: DetectedPosition): Promise<boolean> {
-  console.log("");
-  console.log("═".repeat(70));
-  console.log("  EXISTING POSITION DETECTED");
-  console.log("═".repeat(70));
-  console.log("");
-  console.log("The orchestrator found a non-neutral position from a previous session:");
-  console.log("");
-  console.log(`  Condition ID: ${position.conditionId.substring(0, 18)}...`);
-  console.log(`  Position:     YES=${position.yesBalance.toFixed(2)}, NO=${position.noBalance.toFixed(2)}`);
-  
-  const direction = position.netExposure >= 0 ? "YES" : "NO";
-  const exposure = position.netExposure >= 0 
-    ? `+${position.netExposure.toFixed(2)}` 
-    : position.netExposure.toFixed(2);
-  console.log(`  Net Exposure: ${exposure} ${direction}`);
-
-  if (position.marketQuestion) {
-    console.log(`  Market:       ${position.marketQuestion}`);
-  }
-
-  console.log("");
-  console.log("To avoid fragmenting your capital across multiple markets, the");
-  console.log("orchestrator should resume this market until the position is neutral.");
-  console.log("");
-  console.log("═".repeat(70));
-  console.log("");
-
-  const answer = await promptForInput(
-    "Resume this market? (yes/no): "
-  );
-
-  return answer.toLowerCase().trim() === "yes" || answer.toLowerCase().trim() === "y";
-}
-
-/**
- * Prompts user to confirm ignoring positions (dangerous operation).
- *
- * @returns True if user confirms with exact phrase, false otherwise
- */
 async function promptIgnorePositions(): Promise<boolean> {
   console.log("");
   console.log("⚠️  WARNING: You are about to ignore existing positions!");
@@ -409,6 +346,201 @@ async function promptIgnorePositions(): Promise<boolean> {
   );
 
   return answer.toLowerCase().trim() === "yes-ignore-positions";
+}
+
+/**
+ * Reconstructs liquidation markets from detected positions.
+ * 
+ * Loads persisted state for each position and creates LiquidationMarket objects
+ * with position tracker and profit protection.
+ * 
+ * @param client - Authenticated CLOB client
+ * @param positions - Detected positions marked as in liquidation
+ * @param config - Orchestrator configuration
+ * @returns Array of reconstructed liquidation markets
+ */
+async function reconstructLiquidationMarkets(
+  client: ClobClient,
+  positions: DetectedPosition[],
+  config: OrchestratorConfig
+): Promise<LiquidationMarket[]> {
+  const liquidationMarkets: LiquidationMarket[] = [];
+
+  for (const position of positions) {
+    try {
+      log(`[Orchestrator] Reconstructing liquidation for ${position.conditionId.substring(0, 18)}...`);
+
+      // Load persisted state with fills
+      const state = await loadMarketState(position.conditionId);
+      
+      if (!state || !state.fills) {
+        log(`[Orchestrator] Warning: No persisted state for ${position.conditionId.substring(0, 18)}..., skipping`);
+        continue;
+      }
+
+      // Create position tracker and initialize with current on-chain balances
+      const tracker = createPositionTracker(
+        position.conditionId,
+        position.yesTokenId,
+        position.noTokenId,
+        config.positionLimits.maxNetExposure
+      );
+
+      // CRITICAL: Initialize tracker with current balances FIRST
+      tracker.initialize(position.yesBalance, position.noBalance);
+      
+      log(`[Orchestrator]   Initialized tracker: YES=${position.yesBalance.toFixed(2)}, NO=${position.noBalance.toFixed(2)}`);
+
+      // Load fills into tracker (for economics/P&L tracking)
+      for (const fill of state.fills) {
+        tracker.processFill(fill);
+      }
+
+      // Load initial cost basis if present
+      if (state.initialCostBasis) {
+        const { yesAvgCost, noAvgCost } = state.initialCostBasis;
+        if (yesAvgCost !== null && noAvgCost !== null) {
+          tracker.setInitialCostBasis(yesAvgCost, noAvgCost);
+        }
+      }
+
+      // Calculate profit-protection ceiling
+      const netExposure = tracker.getNetExposure();
+      const maxBuyPrice = calculateMaxBuyPrice(tracker, netExposure);
+
+      log(`[Orchestrator]   Net exposure: ${netExposure.toFixed(2)} (${netExposure > 0 ? 'long YES' : 'long NO'})`);
+      if (maxBuyPrice !== null) {
+        log(`[Orchestrator]   Break-even ceiling: $${maxBuyPrice.toFixed(4)}`);
+      }
+
+      // Convert stage string to enum
+      let stage: LiquidationStage = LiquidationStage.PASSIVE;
+      if (position.liquidationInfo?.stage) {
+        const stageStr = position.liquidationInfo.stage.toLowerCase();
+        if (stageStr === "passive") stage = LiquidationStage.PASSIVE;
+        else if (stageStr === "skewed") stage = LiquidationStage.SKEWED;
+        else if (stageStr === "aggressive") stage = LiquidationStage.AGGRESSIVE;
+        else if (stageStr === "market") stage = LiquidationStage.MARKET;
+      }
+
+      // Create minimal market config for liquidation
+      // We need to discover this market to get proper config
+      const result = await discoverMarkets({
+        maxMinSize: config.orderSize,
+      });
+
+      const matchingMarket = result.markets.find((m) => m.conditionId === position.conditionId);
+
+      if (!matchingMarket) {
+        log(`[Orchestrator]   Warning: Market not found in discovery, creating minimal config`);
+        
+        // Create minimal config without rewards info
+        const minimalMarket: RankedMarketByEarnings = {
+          id: position.conditionId,
+          conditionId: position.conditionId,
+          question: position.marketQuestion ?? `Market ${position.conditionId.substring(0, 8)}`,
+          clobTokenIds: `["${position.yesTokenId}","${position.noTokenId}"]`,
+          eventSlug: "liquidation",
+          eventTitle: "Liquidation Market",
+          slug: "liquidation-market",
+          active: true,
+          closed: false,
+          acceptingOrders: true,
+          enableOrderBook: true,
+          negRisk: false, // Default to false if unknown
+          liquidityNum: 0,
+          volume24hr: 0,
+          rewardsMinSize: config.orderSize,
+          rewardsMaxSpread: 0.035, // Default 3.5 cents
+          rewardsDaily: 0,
+          competitive: 0,
+          earningPotential: {
+            estimatedDailyEarnings: 0,
+            earningEfficiency: 0,
+            easeOfParticipation: 0,
+            totalScore: 0,
+            compatible: true,
+          },
+        };
+
+        const mmConfig = createConfigForMarket(minimalMarket, config, {
+          phase: "startup",
+          currentMarket: null,
+          currentConfig: null,
+          pendingSwitch: null,
+          liquidationMarkets: [],
+          switchCount: 0,
+          marketsVisited: [],
+          startTime: new Date(),
+          running: true,
+          lastError: null,
+          cumulativeStats: {
+            startTime: Date.now(),
+            fillCount: 0,
+            totalVolume: 0,
+            mergeCount: 0,
+            totalMerged: 0,
+            rebalanceCount: 0,
+            ordersPlaced: 0,
+            ordersCancelled: 0,
+          },
+        });
+
+        liquidationMarkets.push({
+          market: minimalMarket,
+          config: mmConfig,
+          tracker,
+          startedAt: position.liquidationInfo?.startedAt ?? new Date(),
+          stage,
+          activeOrderId: null,
+          lastMidpoint: null,
+          maxBuyPrice,
+        });
+      } else {
+        // Use discovered market config
+        const mmConfig = createConfigForMarket(matchingMarket, config, {
+          phase: "startup",
+          currentMarket: null,
+          currentConfig: null,
+          pendingSwitch: null,
+          liquidationMarkets: [],
+          switchCount: 0,
+          marketsVisited: [],
+          startTime: new Date(),
+          running: true,
+          lastError: null,
+          cumulativeStats: {
+            startTime: Date.now(),
+            fillCount: 0,
+            totalVolume: 0,
+            mergeCount: 0,
+            totalMerged: 0,
+            rebalanceCount: 0,
+            ordersPlaced: 0,
+            ordersCancelled: 0,
+          },
+        });
+
+        liquidationMarkets.push({
+          market: matchingMarket,
+          config: mmConfig,
+          tracker,
+          startedAt: position.liquidationInfo?.startedAt ?? new Date(),
+          stage,
+          activeOrderId: null,
+          lastMidpoint: null,
+          maxBuyPrice,
+        });
+      }
+
+      log(`[Orchestrator]   ✓ Liquidation reconstructed`);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      log(`[Orchestrator]   Error reconstructing ${position.conditionId.substring(0, 18)}...: ${msg}`);
+    }
+  }
+
+  return liquidationMarkets;
 }
 
 // =============================================================================
@@ -665,11 +797,17 @@ export async function runOrchestrator(config: OrchestratorConfig): Promise<void>
 
   // Re-evaluation timer handle
   let reEvalTimer: NodeJS.Timeout | null = null;
+  
+  // Liquidation management timer handle
+  let liqTimer: NodeJS.Timeout | null = null;
+  
+  // Client handle (for cleanup in finally block)
+  let client: ClobClient | null = null;
 
   try {
     // Initialize client
     log("[Orchestrator] Initializing client...");
-    const client = await createAuthenticatedClobClient();
+    client = await createAuthenticatedClobClient();
     log("[Orchestrator] Client initialized");
 
     // Check USDC balance
@@ -684,7 +822,7 @@ export async function runOrchestrator(config: OrchestratorConfig): Promise<void>
     }
 
     // =========================================================================
-    // POSITION DETECTION: Check for existing positions to resume
+    // POSITION DETECTION: Check for existing positions
     // =========================================================================
     log(`\n[Orchestrator] Checking for existing positions...`);
 
@@ -701,144 +839,108 @@ export async function runOrchestrator(config: OrchestratorConfig): Promise<void>
       return;
     }
 
-    let shouldResume = false;
-    let resumePosition: DetectedPosition | null = null;
+    // Separate liquidation vs non-liquidation positions
+    const liquidationPositions = detectedPositions.filter((p) => p.inLiquidation);
+    const activePositions = detectedPositions.filter((p) => !p.inLiquidation);
 
-    if (detectedPositions.length > 0) {
-      // Found existing positions
-      resumePosition = findPriorityMarket(detectedPositions);
+    // =========================================================================
+    // RESTORE LIQUIDATIONS: Auto-load markets already in liquidation mode
+    // =========================================================================
+    if (liquidationPositions.length > 0) {
+      log(`\n[Orchestrator] Restoring ${liquidationPositions.length} liquidation(s) from previous session...`);
+      
+      const restored = await reconstructLiquidationMarkets(client, liquidationPositions, config);
+      state.liquidationMarkets.push(...restored);
+      
+      log(`[Orchestrator] ✓ ${restored.length} liquidation(s) restored`);
+      
+      // Save liquidation state
+      saveLiquidationsState(state);
+    }
 
-      if (!resumePosition) {
-        log("[Orchestrator] Warning: Positions detected but none prioritized");
-      } else {
-        // Handle based on configuration
-        if (config.ignorePositions) {
-          // User wants to ignore positions (dangerous)
-          log("[Orchestrator] ⚠️  --ignore-positions flag set");
-          const confirmed = await promptIgnorePositions();
-          
-          if (!confirmed) {
-            log("[Orchestrator] Position ignore cancelled by user");
-            log("[Orchestrator] Resuming existing position instead");
-            shouldResume = true;
-          } else {
-            log("[Orchestrator] ⚠️  User confirmed ignoring existing positions");
-            log("[Orchestrator] WARNING: Capital will be fragmented across markets!");
-            shouldResume = false;
-          }
-        } else if (config.autoResume) {
-          // Auto-resume mode (24/7 operation)
-          log(`[Orchestrator] Found position in ${resumePosition.conditionId.substring(0, 18)}...`);
-          log("[Orchestrator] Auto-resuming (--auto-resume enabled)");
-          shouldResume = true;
+    // =========================================================================
+    // HANDLE ACTIVE POSITIONS: Liquidate or exit
+    // =========================================================================
+    if (activePositions.length > 0) {
+      log(`\n[Orchestrator] Found ${activePositions.length} non-liquidation position(s)`);
+      
+      if (config.ignorePositions) {
+        // User wants to ignore positions (dangerous)
+        log("[Orchestrator] ⚠️  --ignore-positions flag set");
+        const confirmed = await promptIgnorePositions();
+        
+        if (!confirmed) {
+          log("[Orchestrator] Position ignore cancelled - will liquidate instead");
+          // Add to liquidation queue
+          const newLiquidations = await reconstructLiquidationMarkets(client, activePositions, config);
+          state.liquidationMarkets.push(...newLiquidations);
+          saveLiquidationsState(state);
         } else {
-          // Supervised mode - prompt user
-          shouldResume = await promptResumePosition(resumePosition);
+          log("[Orchestrator] ⚠️  User confirmed ignoring positions");
+          log("[Orchestrator] WARNING: Capital will be fragmented across markets!");
+        }
+      } else if (config.autoResume) {
+        // Auto-liquidate mode (safe default for 24/7 operation)
+        log(`[Orchestrator] Auto-liquidating ${activePositions.length} position(s) (--auto-resume enabled)`);
+        
+        const newLiquidations = await reconstructLiquidationMarkets(client, activePositions, config);
+        state.liquidationMarkets.push(...newLiquidations);
+        saveLiquidationsState(state);
+        
+        log(`[Orchestrator] ✓ ${newLiquidations.length} position(s) queued for liquidation`);
+      } else {
+        // Supervised mode - prompt user
+        const action = await promptPositionAction(activePositions);
+        
+        if (action === "liquidate") {
+          log(`[Orchestrator] User chose to liquidate all positions`);
           
-          if (!shouldResume) {
-            log("[Orchestrator] User declined to resume position");
-            log("[Orchestrator] Continuing with new market discovery");
-            log("[Orchestrator] ⚠️  WARNING: This may fragment your capital!");
-          }
+          const newLiquidations = await reconstructLiquidationMarkets(client, activePositions, config);
+          state.liquidationMarkets.push(...newLiquidations);
+          saveLiquidationsState(state);
+          
+          log(`[Orchestrator] ✓ ${newLiquidations.length} position(s) queued for liquidation`);
+        } else {
+          // User chose to exit
+          log("[Orchestrator] User chose to exit - stopping orchestrator");
+          return;
         }
       }
-    } else {
+    } else if (liquidationPositions.length === 0) {
       log("[Orchestrator] No existing positions detected");
     }
 
     // =========================================================================
-    // STARTUP: Find or resume initial market
+    // STARTUP: Find best active market for trading
     // =========================================================================
     setPhase(state, "startup");
+    log(`\n[Orchestrator] Finding best market for active trading...`);
 
-    let initialMarket: RankedMarketByEarnings | null = null;
-    let initialConfig: OrchestratableMarketMakerConfig | null = null;
+    // Exclude markets currently in liquidation from discovery
+    const excludeConditionIds = state.liquidationMarkets.map((lm) => lm.market.conditionId);
 
-    if (shouldResume && resumePosition) {
-      // ===================================================================
-      // RESUME PATH: Load existing market
-      // ===================================================================
-      log(`\n[Orchestrator] Resuming market: ${resumePosition.conditionId.substring(0, 18)}...`);
+    const initialMarket = await findBestMarket(config.liquidity, {
+      maxMinSize: config.orderSize,
+      volatilityThresholds: config.volatilityFilter,
+      excludeNegRisk: config.excludeNegRisk,
+      excludeConditionIds,
+      onFetchProgress: (fetched, total, filtered) => {
+        printDiscoveryProgress("Fetch", `${fetched}/${total} markets, ${filtered} passed filters`);
+      },
+      onCompetitionProgress: (fetched, total) => {
+        printDiscoveryProgress("Competition", `${fetched}/${total} orderbooks`);
+      },
+      onVolatilityProgress: (checked, total, filtered) => {
+        printDiscoveryProgress("Volatility", `${checked}/${total} checked, ${filtered} filtered`);
+      },
+    });
 
-      const resumedConfig = await createConfigFromPosition(resumePosition, config, state);
-
-      if (!resumedConfig) {
-        log("[Orchestrator] Error: Failed to load market data for resume");
-        log("[Orchestrator] Falling back to new market discovery");
-        
-        // Fall through to discovery path below
-      } else {
-        // Successfully loaded, we can resume
-        // We need to reconstruct a RankedMarketByEarnings for consistency
-        // But we don't have full market data, so we'll create a minimal version
-        log("[Orchestrator] Successfully loaded market config");
-        initialConfig = resumedConfig;
-        
-        // Create a placeholder market object for state tracking
-        // This is not ideal but necessary for the current architecture
-        initialMarket = {
-          id: resumePosition.conditionId,
-          conditionId: resumePosition.conditionId,
-          question: resumePosition.marketQuestion ?? `Market ${resumePosition.conditionId.substring(0, 8)}`,
-          clobTokenIds: `["${resumePosition.yesTokenId}","${resumePosition.noTokenId}"]`,
-          eventSlug: "resumed",
-          eventTitle: "Resumed Market",
-          slug: "resumed-market",
-          active: true,
-          closed: false,
-          acceptingOrders: true,
-          enableOrderBook: true,
-          negRisk: resumedConfig.market.negRisk, // Use the negRisk from the persisted config
-          liquidityNum: 0,
-          volume24hr: 0,
-          rewardsMinSize: resumedConfig.market.minOrderSize,
-          rewardsMaxSpread: resumedConfig.market.maxSpread,
-          rewardsDaily: resumedConfig.market.rewardsDaily ?? 0,
-          competitive: 0, // Unknown for resumed markets
-          earningPotential: {
-            estimatedDailyEarnings: 0, // Will be calculated during operation
-            earningEfficiency: 0,
-            easeOfParticipation: 0,
-            totalScore: 0,
-            compatible: true,
-          },
-        } as RankedMarketByEarnings;
-
-        log(`[Orchestrator] Resumed: ${initialMarket.question}`);
-      }
+    if (!initialMarket) {
+      throw new Error("No eligible markets found during startup");
     }
 
-    // If resume failed or was declined, discover new market
-    if (!initialConfig || !initialMarket) {
-      // ===================================================================
-      // DISCOVERY PATH: Find best market
-      // ===================================================================
-      log(`\n[Orchestrator] Finding best market...`);
-
-      const discoveredMarket = await findBestMarket(config.liquidity, {
-        maxMinSize: config.orderSize,
-        volatilityThresholds: config.volatilityFilter,
-        excludeNegRisk: config.excludeNegRisk,
-        onFetchProgress: (fetched, total, filtered) => {
-          printDiscoveryProgress("Fetch", `${fetched}/${total} markets, ${filtered} passed filters`);
-        },
-        onCompetitionProgress: (fetched, total) => {
-          printDiscoveryProgress("Competition", `${fetched}/${total} orderbooks`);
-        },
-        onVolatilityProgress: (checked, total, filtered) => {
-          printDiscoveryProgress("Volatility", `${checked}/${total} checked, ${filtered} filtered`);
-        },
-      });
-
-      if (!discoveredMarket) {
-        throw new Error("No eligible markets found during startup");
-      }
-
-      initialMarket = discoveredMarket;
-      initialConfig = createConfigForMarket(initialMarket, config, state);
-      
-      printSelectedMarket(initialMarket);
-    }
+    const initialConfig = createConfigForMarket(initialMarket, config, state);
+    printSelectedMarket(initialMarket);
 
     // Set initial market and config
     state.currentMarket = initialMarket;
@@ -861,7 +963,7 @@ export async function runOrchestrator(config: OrchestratorConfig): Promise<void>
       
       reEvalTimer = setInterval(() => {
         // Don't re-evaluate during startup or shutdown
-        if (state.phase === "market_making" && state.running) {
+        if (state.phase === "market_making" && state.running && client) {
           reEvaluateMarkets(client, state, config).catch((err) => {
             log(`[Orchestrator] Re-evaluation error: ${err}`);
           });
@@ -869,6 +971,21 @@ export async function runOrchestrator(config: OrchestratorConfig): Promise<void>
       }, config.reEvaluateIntervalMs);
     } else {
       log(`[Orchestrator] Switching disabled - no re-evaluation timer`);
+    }
+
+    // =========================================================================
+    // Start periodic liquidation management timer (every 30 seconds)
+    // =========================================================================
+    if (config.enableSwitching) {
+      log(`[Orchestrator] Starting liquidation management timer (every 30s)`);
+      
+      liqTimer = setInterval(() => {
+        if (state.phase === "market_making" && state.running && client) {
+          manageLiquidations(client, state, config).catch((err) => {
+            log(`[Orchestrator] Liquidation management error: ${err}`);
+          });
+        }
+      }, 30_000);
     }
 
     // =========================================================================
@@ -944,6 +1061,75 @@ export async function runOrchestrator(config: OrchestratorConfig): Promise<void>
             }
             break;
 
+          case "position_limit":
+            log(`[Orchestrator] Position limit hit on: ${state.currentMarket!.question}`);
+            
+            // Calculate max buy price (break-even ceiling) for liquidation
+            const tracker = result.positionTracker!;
+            const netExposure = tracker.getNetExposure();
+            const maxBuyPrice = calculateMaxBuyPrice(tracker, netExposure);
+            
+            if (maxBuyPrice !== null) {
+              log(`[Orchestrator] Liquidation ceiling: max buy price = $${maxBuyPrice.toFixed(4)}`);
+            }
+            
+            // Move current market to liquidation mode
+            const liqMarket: LiquidationMarket = {
+              market: state.currentMarket!,
+              config: state.currentConfig!,
+              tracker: result.positionTracker!, 
+              startedAt: new Date(),
+              stage: LiquidationStage.PASSIVE,
+              activeOrderId: null,
+              lastMidpoint: null,
+              maxBuyPrice,
+            };
+            
+            state.liquidationMarkets.push(liqMarket);
+            log(`[Orchestrator] Added to liquidation queue (${state.liquidationMarkets.length} total)`);
+            
+            // Save liquidation state to disk
+            saveLiquidationsState(state);
+            
+            // Find new best market (exclude markets in liquidation)
+            const excludeConditionIds = state.liquidationMarkets.map(lm => lm.market.conditionId);
+            const newMarket = await findBestMarket(config.liquidity, {
+              maxMinSize: config.orderSize,
+              volatilityThresholds: config.volatilityFilter,
+              excludeNegRisk: config.excludeNegRisk,
+              excludeConditionIds,
+              onFetchProgress: (fetched, total, filtered) => {
+                printDiscoveryProgress("Fetch", `${fetched}/${total} markets, ${filtered} passed filters`);
+              },
+              onCompetitionProgress: (fetched, total) => {
+                printDiscoveryProgress("Competition", `${fetched}/${total} orderbooks`);
+              },
+              onVolatilityProgress: (checked, total, filtered) => {
+                printDiscoveryProgress("Volatility", `${checked}/${total} checked, ${filtered} filtered`);
+              },
+            });
+            
+            if (!newMarket) {
+              log(`[Orchestrator] No new markets available`);
+              state.running = false;
+              break;
+            }
+            
+            // Switch to new active market
+            state.currentMarket = newMarket;
+            state.currentConfig = createConfigForMarket(newMarket, config, state);
+            state.switchCount++;
+            if (!state.marketsVisited.includes(newMarket.conditionId)) {
+              state.marketsVisited.push(newMarket.conditionId);
+            }
+            
+            // Validate new config
+            validateConfig(state.currentConfig);
+            
+            log(`[Orchestrator] Starting new active market: ${newMarket.question}`);
+            printSelectedMarket(newMarket);
+            break;
+
           case "shutdown":
             // Exit loop
             state.running = false;
@@ -978,6 +1164,49 @@ export async function runOrchestrator(config: OrchestratorConfig): Promise<void>
     if (reEvalTimer) {
       clearInterval(reEvalTimer);
       reEvalTimer = null;
+    }
+
+    // Clear liquidation timer
+    if (liqTimer) {
+      clearInterval(liqTimer);
+      liqTimer = null;
+    }
+
+    // Cancel all active orders on shutdown
+    if (client) {
+      log("\n[Orchestrator] Shutting down, cancelling active orders...");
+      
+      // Cancel active market maker orders
+      if (state.currentConfig) {
+        const { yesTokenId, noTokenId } = state.currentConfig.market;
+        try {
+          await cancelOrdersForToken(client, yesTokenId);
+          await cancelOrdersForToken(client, noTokenId);
+          log(`[Orchestrator] Cancelled active market maker orders`);
+        } catch (error) {
+          log(`[Orchestrator] Warning: Failed to cancel market maker orders: ${error}`);
+        }
+      }
+      
+      // Cancel liquidation orders
+      let liqOrdersCancelled = 0;
+      for (const liqMarket of state.liquidationMarkets) {
+        if (liqMarket.activeOrderId) {
+          try {
+            await cancelOrder(client, liqMarket.activeOrderId);
+            liqOrdersCancelled++;
+          } catch (error) {
+            log(`[Orchestrator] Warning: Failed to cancel liquidation order ${liqMarket.activeOrderId}: ${error}`);
+          }
+        }
+      }
+      if (liqOrdersCancelled > 0) {
+        log(`[Orchestrator] Cancelled ${liqOrdersCancelled} liquidation orders`);
+      }
+      
+      // Note: We keep liquidation state in ./data/liquidations.json
+      // On restart, positions will be detected and can resume properly
+      log(`[Orchestrator] Liquidation state saved to disk (${state.liquidationMarkets.length} markets)`);
     }
 
     // Print summary
@@ -1032,8 +1261,8 @@ Options:
   --volatility-lookback <n>    Lookback window in minutes (default: 60)
   --no-volatility-filter       Disable volatility filtering entirely
   
-  Position Resume (restart protection):
-  --auto-resume                Auto-resume positions without prompting (24/7 mode)
+  Position Handling (restart protection):
+  --auto-resume                Auto-liquidate positions without prompting (24/7 mode)
   --ignore-positions           Force new market discovery (DANGEROUS, prompts for confirmation)
   --check-positions-only       Only check and report positions, don't start
   
@@ -1044,12 +1273,12 @@ Options:
 
 How it works:
   1. On startup, checks for existing positions to prevent capital fragmentation
-  2. If position found: prompts to resume (or auto-resumes with --auto-resume)
-  3. If no position: finds the best market based on earning potential
-  4. Runs market maker continuously
-  5. Every N minutes, checks if a better market exists
-  6. If better market found, sets "pending switch"
-  7. When position becomes neutral AND pending switch exists, switches markets
+  2. Positions in liquidations.json: automatically restored to liquidation queue
+  3. New positions found: prompts to liquidate (or auto-liquidates with --auto-resume)
+  4. Liquidation runs passively in background (profit-protected exit orders)
+  5. Finds best market for active trading (excluding liquidation markets)
+  6. Every N minutes, re-evaluates and switches to better markets when neutral
+  7. When position limits hit, moves market to liquidation + starts new market
 
 Examples:
   npm run orchestrate                          # Dry run, log switching decisions

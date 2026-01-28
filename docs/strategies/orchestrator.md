@@ -7,10 +7,13 @@ Automatic market selection and switching to maximize liquidity rewards.
 The orchestrator automates the market maker workflow:
 
 1. **Position detection on startup** - Scans for existing positions to prevent capital fragmentation
-2. **Resume or discover** - Prompts to resume existing market, or finds best new market
-3. **Run market maker** - Continuously provides liquidity
-4. **Periodic re-evaluation** - Checks for better markets every N minutes
-5. **Smart switching** - Only switches when position is neutral AND better market exists
+2. **Restore liquidations** - Automatically restores markets from `./data/liquidations.json` into liquidation queue
+3. **Handle active positions** - Prompts to liquidate other non-neutral positions (or auto-liquidates with `--auto-resume`)
+4. **Discover best market** - Finds best new market for active trading (excluding liquidation markets)
+5. **Run market maker** - Continuously provides liquidity on active market
+6. **Manage liquidations** - Passively exits positions in background on liquidation markets
+7. **Periodic re-evaluation** - Checks for better markets every N minutes
+8. **Smart switching** - Only switches when position is neutral AND better market exists
 
 This eliminates manual market selection and enables 24/7 operation with automatic optimization,
 while preventing capital fragmentation across multiple markets when restarting.
@@ -27,7 +30,7 @@ npm run orchestrate -- --liquidity 200
 # Check for existing positions only (diagnostics)
 npm run orchestrate -- --check-positions-only
 
-# Auto-resume mode for 24/7 operation
+# Auto-liquidate mode for 24/7 operation
 npm run orchestrate -- --auto-resume
 
 # Adjust volatility filtering
@@ -52,14 +55,27 @@ STARTUP
    │ detect existing positions
    ▼
 ┌──────────────────────────────┐
-│ Have non-neutral position?   │
+│ Liquidations in json file?   │
 └──────────────────────────────┘
    │              │
    YES            NO
    │              │
    ▼              ▼
-PROMPT USER    FIND BEST MARKET
-(or auto)         │
+RESTORE       CHECK ACTIVE
+LIQUIDATIONS   POSITIONS
+   │              │
+   └──────┬───────┘
+          │
+          ▼
+┌──────────────────────────────┐
+│ Other non-neutral positions? │
+└──────────────────────────────┘
+   │              │
+   YES            NO
+   │              │
+   ▼              ▼
+PROMPT/AUTO   FIND BEST MARKET
+LIQUIDATE     (excl. liq markets)
    │              │
    └──────┬───────┘
           ▼
@@ -92,11 +108,12 @@ PROMPT USER    FIND BEST MARKET
 
 **Restart Protection:**
 - On startup, the orchestrator scans all `./data/fills-*.json` files for existing positions
-- If a non-neutral position is found (net exposure > 0.1 tokens), it prompts to resume that market
+- Markets already in `./data/liquidations.json` are automatically restored to the liquidation queue
+- Other non-neutral positions (net exposure > 0.1 tokens) are handled based on mode:
+  - **Supervised mode** (default): Prompts to liquidate all or exit
+  - **24/7 mode** (`--auto-resume`): Automatically queues them for liquidation (passive exit orders)
 - This prevents capital fragmentation when restarting unexpectedly (crash, manual stop, etc.)
-- **Supervised mode** (default): Requires manual confirmation to resume
-- **24/7 mode** (`--auto-resume`): Automatically resumes without prompt
-- **Priority**: If multiple positions exist, resumes the one with largest net exposure
+- **Priority**: Positions with larger net exposure are highlighted as more urgent
 
 **Pending Switch Pattern:**
 - Neutral position **enables** switching but doesn't **trigger** it
@@ -105,7 +122,7 @@ PROMPT USER    FIND BEST MARKET
 
 **Why this design?**
 - Market maker keeps earning rewards while waiting for neutral
-- No forced liquidation or market crossing
+- Liquidation markets exit passively in parallel (no blocking)
 - Natural position unwind through normal trading
 
 ### Switching Logic
@@ -136,7 +153,7 @@ Example with 20% threshold:
 | `--max-volatility <n>` | 0.10 | Max price change % threshold (0.10 = 10%) |
 | `--volatility-lookback <n>` | 60 | Volatility lookback window in minutes |
 | `--no-volatility-filter` | - | Disable volatility filtering entirely |
-| `--auto-resume` | false | Auto-resume positions without prompting (24/7 mode) |
+| `--auto-resume` | false | Auto-liquidate detected non-liquidation positions without prompting (24/7 mode) |
 | `--ignore-positions` | false | Force new discovery (dangerous, requires confirmation) |
 | `--check-positions-only` | false | Only check and report positions, don't start |
 | `--enable-switching` | false | Enable automatic market switching |
@@ -205,7 +222,8 @@ Markets are filtered by:
   - Configurable via `--max-volatility` and `--volatility-lookback` flags
   - Can be disabled with `--no-volatility-filter`
   - Uses optimized top-first checking (only checks top-ranked candidates, not all markets upfront for performance)
-- **NegRisk exclusion:** NegRisk markets (multi-outcome markets) are automatically excluded due to signature compatibility issues (requires testing and fixing)
+- **NegRisk support:** NegRisk markets (multi-outcome markets) are fully supported
+  - Can be optionally filtered via `--exclude-negrisk` flag (disabled by default)
 
 ## Session Summary
 
@@ -218,6 +236,7 @@ On shutdown, the orchestrator prints a summary:
   Runtime:        4h 23m 15s
   Markets:        3 visited
   Switches:       2
+  Liquidations:   1 completed, 0 active
   Total Fills:    47
   Total Volume:   $2,345.67
   Total Merges:   12
@@ -288,37 +307,34 @@ On shutdown, the orchestrator prints a summary:
 [2026-01-19 10:15:01] [Orchestrator] USDC balance: $500.00
 
 [2026-01-19 10:15:01] [Orchestrator] Checking for existing positions...
-[2026-01-19 10:15:02] [Position Detection] Scanning 1 market(s) for positions...
+[2026-01-19 10:15:02] [Position Detection] Scanning 2 market(s) for positions...
 [2026-01-19 10:15:02] [Position Detection] Found position in 0xabc123...: YES=35.50, NO=18.20, net=+17.30
+[2026-01-19 10:15:02] [Position Detection] Found position in 0xdef456... (marked as liquidation)
 
-══════════════════════════════════════════════════════════════════════
-  EXISTING POSITION DETECTED
-══════════════════════════════════════════════════════════════════════
+[2026-01-19 10:15:02] [Orchestrator] Restoring 1 liquidation(s) from previous session...
+[2026-01-19 10:15:03] [Orchestrator] ✓ Liquidation reconstructed for 0xdef456...
 
-The orchestrator found a non-neutral position from a previous session:
+[2026-01-19 10:15:03] [Orchestrator] Found 1 non-liquidation position(s)
 
-  Condition ID: 0xabc123...
-  Position:     YES=35.50, NO=18.20
-  Net Exposure: +17.30 YES
-  Market:       Will Bitcoin reach $100k by March 2026?
+What would you like to do with the detected position(s)?
+1. Liquidate all positions (queue them for passive exit)
+2. Exit (manually handle positions)
 
-To avoid fragmenting your capital across multiple markets, the
-orchestrator should resume this market until the position is neutral.
+Choice: 1
 
-══════════════════════════════════════════════════════════════════════
+[2026-01-19 10:15:10] [Orchestrator] User chose to liquidate all positions
+[2026-01-19 10:15:11] [Orchestrator] Reconstructing liquidation for 0xabc123...
+[2026-01-19 10:15:12] [Orchestrator] ✓ 1 position(s) queued for liquidation
 
-Resume this market? (yes/no): yes
+[2026-01-19 10:15:12] [Orchestrator] Finding best market for active trading...
+[2026-01-19 10:15:15] [Orchestrator] Selected: Will ETH flip BTC?
+[2026-01-19 10:15:15] [Orchestrator] Starting liquidation management timer (every 30s)
+[2026-01-19 10:15:15] [Orchestrator] Starting market maker for: Will ETH flip BTC?
 
-[2026-01-19 10:15:10] [Orchestrator] Resuming market: 0xabc123...
-[2026-01-19 10:15:11] [Orchestrator] Loading market data for 0xabc123...
-[2026-01-19 10:15:12] [Orchestrator] Successfully loaded market config
-[2026-01-19 10:15:12] [Orchestrator] Resumed: Will Bitcoin reach $100k by March 2026?
-[2026-01-19 10:15:12] [Orchestrator] Starting market maker for: Will Bitcoin reach $100k?
-
-... market maker continues where it left off ...
+... market maker runs on ETH market, liquidations exit passively in background ...
 ```
 
-### Restart with Auto-Resume (24/7 Mode)
+### Restart with Auto-Liquidate (24/7 Mode)
 
 ```
 [2026-01-19 10:20:00] [Orchestrator] Initializing client...
@@ -328,15 +344,16 @@ Resume this market? (yes/no): yes
 [2026-01-19 10:20:01] [Orchestrator] Checking for existing positions...
 [2026-01-19 10:20:02] [Position Detection] Scanning 1 market(s) for positions...
 [2026-01-19 10:20:02] [Position Detection] Found position in 0xabc123...: YES=35.50, NO=18.20, net=+17.30
-[2026-01-19 10:20:02] [Orchestrator] Found position in 0xabc123...
-[2026-01-19 10:20:02] [Orchestrator] Auto-resuming (--auto-resume enabled)
-[2026-01-19 10:20:02] [Orchestrator] Resuming market: 0xabc123...
-[2026-01-19 10:20:03] [Orchestrator] Loading market data for 0xabc123...
-[2026-01-19 10:20:04] [Orchestrator] Successfully loaded market config
-[2026-01-19 10:20:04] [Orchestrator] Resumed: Will Bitcoin reach $100k by March 2026?
-[2026-01-19 10:20:04] [Orchestrator] Starting market maker for: Will Bitcoin reach $100k?
+[2026-01-19 10:20:02] [Orchestrator] Auto-liquidating 1 position(s) (--auto-resume enabled)
+[2026-01-19 10:20:03] [Orchestrator] Reconstructing liquidation for 0xabc123...
+[2026-01-19 10:20:04] [Orchestrator] ✓ 1 position(s) queued for liquidation
 
-... market maker continues automatically ...
+[2026-01-19 10:20:04] [Orchestrator] Finding best market for active trading...
+[2026-01-19 10:20:07] [Orchestrator] Selected: Will ETH flip BTC?
+[2026-01-19 10:20:07] [Orchestrator] Starting liquidation management timer (every 30s)
+[2026-01-19 10:20:07] [Orchestrator] Starting market maker for: Will ETH flip BTC?
+
+... market maker continues automatically on new market, old position exits passively ...
 ```
 
 ### Active Session (Market Evaluation & Switching)
@@ -381,9 +398,9 @@ Resume this market? (yes/no): yes
 The orchestrator found a non-neutral position from a previous session. This is **normal and safe**.
 
 Options:
-- Type `yes` to resume the same market (recommended to avoid fragmenting capital)
-- Type `no` to start a new market (may fragment capital across markets)
-- Use `--auto-resume` flag to skip prompt in 24/7 mode
+- Choose "Liquidate all" to queue them for passive liquidation (recommended - lets you start earning on a new market immediately)
+- Choose "Exit" to manually handle positions before starting
+- Use `--auto-resume` flag to skip prompt in 24/7 mode (auto-liquidates)
 
 **Want to check positions without starting?**
 
@@ -400,12 +417,12 @@ npm run orchestrate -- --ignore-positions
 ```
 
 ⚠️ **WARNING:** This will prompt for confirmation with the exact phrase `yes-ignore-positions`.
-Only use this if you understand the risk of capital fragmentation.
+Only use this if you understand the risk of having capital locked in multiple markets.
 
 **Lost track of which markets you're in?**
 
-Check the `./data/` directory for `fills-*.json` files. Each file corresponds to a market
-where you have (or had) positions. The filename contains the condition ID.
+Check the `./data/` directory for `fills-*.json` files and `liquidations.json`. Each fills file corresponds to a market
+where you have (or had) positions. The `liquidations.json` file lists markets currently in passive liquidation mode.
 
 ### "No eligible markets found"
 
@@ -437,10 +454,15 @@ The underlying market maker has auto-reconnect. If persistent:
 
 ```
 src/strategies/orchestrator/
-├── index.ts    # Main orchestrator loop, CLI entry point
-├── config.ts   # Configuration types and defaults
-└── types.ts    # TypeScript types (state, events, decisions)
+├── index.ts        # Main orchestrator loop, CLI entry point, dual-market operation
+├── config.ts       # Configuration types and defaults
+├── types.ts        # TypeScript types (state, events, decisions, liquidation)
+└── liquidation.ts  # Liquidation management for passive position exit
 ```
+
+**Related utilities:**
+- `src/utils/liquidationState.ts` - Persistence for `./data/liquidations.json`
+- `src/utils/orchestratorState.ts` - Position detection on startup
 
 ### Dependencies
 

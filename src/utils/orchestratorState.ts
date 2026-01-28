@@ -11,7 +11,8 @@ import path from "path";
 import type { ClobClient } from "@polymarket/clob-client";
 import { getTokenBalance } from "./balance.js";
 import { loadMarketState, getStoragePath } from "./storage.js";
-import { log } from "./helpers.js";
+import { log, promptForInput } from "./helpers.js";
+import { loadLiquidations } from "./liquidationState.js";
 
 /**
  * Detected position in a market.
@@ -43,6 +44,15 @@ export interface DetectedPosition {
 
   /** Source of position data */
   source: "persisted" | "on-chain-only";
+
+  /** Whether this position is in liquidation mode */
+  inLiquidation: boolean;
+
+  /** Liquidation metadata (if in liquidation) */
+  liquidationInfo?: {
+    startedAt: Date;
+    stage: "passive" | "skewed" | "aggressive" | "market";
+  };
 }
 
 /**
@@ -54,9 +64,10 @@ const DUST_THRESHOLD = 0.1;
 /**
  * Scans all markets for non-neutral positions.
  *
- * Two-phase detection:
- * 1. Scan persisted data files (./data/fills-*.json) for known markets
- * 2. Verify on-chain balances for ground truth
+ * Three-phase detection:
+ * 1. Load liquidations.json to identify markets in liquidation mode
+ * 2. Scan persisted data files (./data/fills-*.json) for known markets
+ * 3. Verify on-chain balances for ground truth
  *
  * @param client - Authenticated CLOB client
  * @returns Array of detected positions (empty if all neutral)
@@ -71,6 +82,18 @@ export async function detectExistingPositions(
   if (!fs.existsSync(dataDir)) {
     return positions;
   }
+
+  // Load liquidation state to mark positions in liquidation
+  const liquidationsData = loadLiquidations();
+  const liquidationConditionIds = new Set(
+    liquidationsData?.markets.map((m) => m.conditionId) ?? []
+  );
+  const liquidationMap = new Map(
+    liquidationsData?.markets.map((m) => [
+      m.conditionId,
+      { startedAt: new Date(m.startedAt), stage: m.stage },
+    ]) ?? []
+  );
 
   // Scan all fills-*.json files
   const files = fs.readdirSync(dataDir);
@@ -101,8 +124,9 @@ export async function detectExistingPositions(
       const yesBalanceRaw = await getTokenBalance(client, yesTokenId);
       const noBalanceRaw = await getTokenBalance(client, noTokenId);
 
-      const yesBalance = parseFloat(yesBalanceRaw.balance);
-      const noBalance = parseFloat(noBalanceRaw.balance);
+      // Use balanceNumber (already parsed from raw units to human-readable)
+      const yesBalance = yesBalanceRaw.balanceNumber;
+      const noBalance = noBalanceRaw.balanceNumber;
 
       // Calculate net exposure
       const netExposure = yesBalance - noBalance;
@@ -123,6 +147,10 @@ export async function detectExistingPositions(
         }
       }
 
+      // Check if this market is in liquidation
+      const inLiquidation = liquidationConditionIds.has(conditionId);
+      const liquidationInfo = liquidationMap.get(conditionId);
+
       positions.push({
         conditionId,
         yesTokenId,
@@ -133,12 +161,15 @@ export async function detectExistingPositions(
         absExposure,
         marketQuestion,
         source: "persisted",
+        inLiquidation,
+        liquidationInfo,
       });
 
+      const liqLabel = inLiquidation ? " [LIQUIDATION]" : "";
       log(
         `[Position Detection] Found position in ${conditionId.substring(0, 18)}...: ` +
           `YES=${yesBalance.toFixed(2)}, NO=${noBalance.toFixed(2)}, ` +
-          `net=${netExposure >= 0 ? "+" : ""}${netExposure.toFixed(2)}`
+          `net=${netExposure >= 0 ? "+" : ""}${netExposure.toFixed(2)}${liqLabel}`
       );
     } catch (error) {
       log(`[Position Detection] Error scanning ${file}: ${error}`);
@@ -217,4 +248,73 @@ export function printPositionsSummary(positions: DetectedPosition[]): void {
   console.log("");
   console.log("═".repeat(70));
   console.log("");
+}
+
+/**
+ * Prompts user for action on non-liquidation positions.
+ * 
+ * Returns:
+ * - 'liquidate' - Add to liquidation queue and start new active market
+ * - 'exit' - Stop orchestrator
+ * 
+ * @param positions - Array of positions to handle
+ * @returns Action to take
+ */
+export async function promptPositionAction(
+  positions: DetectedPosition[]
+): Promise<'liquidate' | 'exit'> {
+  console.log("");
+  console.log("═".repeat(70));
+  console.log("  NON-NEUTRAL POSITIONS DETECTED");
+  console.log("═".repeat(70));
+  console.log("");
+  console.log("The orchestrator found non-neutral position(s) from a previous session:");
+  console.log("");
+  
+  for (let i = 0; i < positions.length; i++) {
+    const position = positions[i];
+    console.log(`Position ${i + 1}:`);
+    console.log(`  Condition ID: ${position.conditionId.substring(0, 18)}...`);
+    console.log(`  Position:     YES=${position.yesBalance.toFixed(2)}, NO=${position.noBalance.toFixed(2)}`);
+    
+    const direction = position.netExposure >= 0 ? "YES" : "NO";
+    const exposure = position.netExposure >= 0 
+      ? `+${position.netExposure.toFixed(2)}` 
+      : position.netExposure.toFixed(2);
+    console.log(`  Net Exposure: ${exposure} ${direction}`);
+    
+    if (position.marketQuestion) {
+      console.log(`  Market:       ${position.marketQuestion}`);
+    }
+    console.log("");
+  }
+  
+  console.log("To avoid fragmenting your capital, these positions should be");
+  console.log("liquidated (passively exited) while starting a new active market.");
+  console.log("");
+  console.log("═".repeat(70));
+  console.log("");
+  console.log("What would you like to do?");
+  console.log("");
+  console.log("  [1] Liquidate all positions (recommended)");
+  console.log("      → Passively exit these positions");
+  console.log("      → Start new active market for trading");
+  console.log("");
+  console.log("  [2] Exit orchestrator");
+  console.log("      → Handle positions manually");
+  console.log("");
+  
+  const answer = await promptForInput("Enter choice (1 or 2): ");
+  const choice = answer.trim();
+  
+  if (choice === "1") {
+    return "liquidate";
+  } else if (choice === "2") {
+    return "exit";
+  } else {
+    // Invalid input, default to safe option (exit)
+    console.log("");
+    console.log("Invalid choice. Exiting for safety.");
+    return "exit";
+  }
 }
