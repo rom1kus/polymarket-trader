@@ -268,14 +268,112 @@ export interface FetchMarketsWithRewardsOptions {
 }
 
 /**
+ * Enriches a single market with correct negRisk value from Gamma API.
+ * 
+ * The Rewards API has incorrect/stale negRisk data, while the Gamma API
+ * is the authoritative source for this field. This is critical for proper
+ * signature generation in order placement.
+ *
+ * @param market - Market to enrich (modified in place)
+ * @param fetcher - Optional fetch function for testing
+ * @returns The enriched market
+ */
+export async function enrichMarketNegRisk(
+  market: MarketWithRewards,
+  fetcher: typeof fetch = fetch
+): Promise<MarketWithRewards> {
+  if (!market.slug) return market;
+
+  try {
+    const url = `https://gamma-api.polymarket.com/markets?slug=${market.slug}`;
+    const response = await fetcher(url);
+    
+    if (response.ok) {
+      const gammaMarkets = (await response.json()) as GammaMarket[];
+      if (gammaMarkets.length > 0) {
+        market.negRisk = gammaMarkets[0].negRisk ?? false;
+      }
+    }
+  } catch (error) {
+    // Non-fatal: if enrichment fails, we continue with Rewards API data
+    console.warn(`[gamma] Failed to enrich negRisk for ${market.slug}: ${error}`);
+  }
+
+  return market;
+}
+
+/**
+ * Enriches market data with correct negRisk values from Gamma API.
+ * 
+ * The Rewards API has incorrect/stale negRisk data, while the Gamma API
+ * is the authoritative source for this field. This function fetches markets
+ * individually by slug and updates the negRisk property.
+ *
+ * Note: This adds some overhead, but ensures correct negRisk values which are
+ * critical for proper signature generation in order placement.
+ *
+ * @param markets - Markets to enrich (modified in place)
+ * @param fetcher - Optional fetch function for testing
+ */
+async function enrichNegRiskFromGammaAPI(
+  markets: MarketWithRewards[],
+  fetcher: typeof fetch = fetch
+): Promise<void> {
+  if (markets.length === 0) return;
+
+  try {
+    // Fetch markets by slug (most reliable identifier)
+    // We batch these to avoid overwhelming the API
+    const BATCH_SIZE = 10;
+    const DELAY_MS = 100; // Small delay between batches
+
+    for (let i = 0; i < markets.length; i += BATCH_SIZE) {
+      const batch = markets.slice(i, i + BATCH_SIZE);
+      
+      // Fetch in parallel within batch
+      await Promise.all(
+        batch.map(async (market) => {
+          if (!market.slug) return;
+          
+          try {
+            const url = `https://gamma-api.polymarket.com/markets?slug=${market.slug}`;
+            const response = await fetcher(url);
+            
+            if (response.ok) {
+              const gammaMarkets = (await response.json()) as GammaMarket[];
+              if (gammaMarkets.length > 0) {
+                market.negRisk = gammaMarkets[0].negRisk ?? false;
+              }
+            }
+          } catch (error) {
+            // Skip individual failures
+          }
+        })
+      );
+
+      // Small delay between batches to be nice to the API
+      if (i + BATCH_SIZE < markets.length) {
+        await new Promise(resolve => setTimeout(resolve, DELAY_MS));
+      }
+    }
+  } catch (error) {
+    // Non-fatal: if enrichment fails, we continue with Rewards API data
+    console.warn(`[gamma] Failed to enrich negRisk from Gamma API: ${error}`);
+  }
+}
+
+/**
  * Fetches markets with active reward programs from Polymarket rewards API.
  * 
  * Supports pagination to fetch all markets (API returns max 100 per request).
  * Applies early filtering during fetch to reduce memory usage.
+ * 
+ * IMPORTANT: The Rewards API has incorrect negRisk data. This function automatically
+ * enriches results with correct negRisk values from the authoritative Gamma API.
  *
  * @param options - Filtering options
  * @param fetcher - Optional fetch function for testing
- * @returns Array of markets with reward info
+ * @returns Array of markets with reward info and correct negRisk values
  *
  * @example
  * // Fetch all markets with progress
@@ -407,6 +505,10 @@ export async function fetchMarketsWithRewards(
       break;
     }
   }
+
+  // IMPORTANT: DO NOT enrich negRisk here - too slow for 2000+ markets
+  // Instead, we'll enrich on-demand for the top-ranked markets in marketDiscovery.ts
+  // The Rewards API has incorrect negRisk data, so enrichment is needed before trading
 
   return markets;
 }

@@ -54,6 +54,10 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<Mar
 
   // Fallback polling timer
   let fallbackTimer: NodeJS.Timeout | null = null;
+  
+  // Periodic pending switch check timer (runs every 10 seconds)
+  // This catches edge cases where neutral position exists but no fills/rebalances happen
+  let pendingSwitchCheckTimer: NodeJS.Timeout | null = null;
 
   // Initialize position tracker for position limits
   const positionTracker: PositionTracker | null = await createPositionTracker(client, config);
@@ -133,6 +137,9 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<Mar
         // Update session stats
         state.stats.mergeCount++;
         state.stats.totalMerged += mergeResult.amount;
+        
+        // Check if orchestrator wants to switch after merge (position may now be neutral)
+        checkPendingSwitchAndMaybeExit();
       }
 
       // === Notify orchestrator of neutral position (for logging) ===
@@ -186,6 +193,35 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<Mar
         if (state.activeQuotes.yesQuote) state.stats.ordersPlaced++;
         if (state.activeQuotes.noQuote) state.stats.ordersPlaced++;
         state.lastError = null;
+        
+        // Check if any side is blocked by position limits with non-neutral position
+        // If so, we should exit and let the orchestrator handle liquidation
+        if (positionTracker) {
+          const position = positionTracker.getPositionState();
+          const isNonNeutral = Math.abs(position.netExposure) > 0.1;
+          const anySideBlocked = !state.activeQuotes.yesQuote || !state.activeQuotes.noQuote;
+          
+          if (isNonNeutral && anySideBlocked) {
+            const blockedSides = [];
+            if (!state.activeQuotes.yesQuote) blockedSides.push("YES");
+            if (!state.activeQuotes.noQuote) blockedSides.push("NO");
+            
+            log("");
+            log("╔════════════════════════════════════════════════════════════════╗");
+            log("║  POSITION LIMIT HIT - Market making blocked                    ║");
+            log("╚════════════════════════════════════════════════════════════════╝");
+            log(`  Blocked sides: ${blockedSides.join(", ")}`);
+            log(`  Net Exposure: ${position.netExposure >= 0 ? '+' : ''}${position.netExposure.toFixed(2)}`);
+            log(`  Exiting market maker - let caller/orchestrator handle liquidation...`);
+            
+            exitReason = "position_limit";
+            state.running = false;
+            if (resolveMainLoop) {
+              resolveMainLoop();
+            }
+            return false; // Stop running
+          }
+        }
       } else {
         const yesInfo = state.activeQuotes.yesQuote
           ? `$${state.activeQuotes.yesQuote.price.toFixed(4)}`
@@ -195,6 +231,11 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<Mar
           : "none";
         log(`  Quotes still valid (YES: ${yesInfo}, NO: ${noInfo})`);
       }
+      
+      // Check if orchestrator wants to switch after rebalance
+      // This catches neutral positions even if no fills occurred
+      checkPendingSwitchAndMaybeExit();
+      
       return true; // Continue running
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
@@ -234,6 +275,30 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<Mar
       clearInterval(fallbackTimer);
       fallbackTimer = null;
       log("Stopped fallback polling (WebSocket reconnected)");
+    }
+  };
+  
+  /**
+   * Starts periodic pending switch check timer.
+   * Checks every 10 seconds if orchestrator wants to switch.
+   */
+  const startPendingSwitchCheckTimer = (): void => {
+    if (pendingSwitchCheckTimer || !onCheckPendingSwitch) return;
+    
+    pendingSwitchCheckTimer = setInterval(() => {
+      if (state.running) {
+        checkPendingSwitchAndMaybeExit();
+      }
+    }, 10_000); // Check every 10 seconds
+  };
+  
+  /**
+   * Stops pending switch check timer.
+   */
+  const stopPendingSwitchCheckTimer = (): void => {
+    if (pendingSwitchCheckTimer) {
+      clearInterval(pendingSwitchCheckTimer);
+      pendingSwitchCheckTimer = null;
     }
   };
 
@@ -286,6 +351,7 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<Mar
   const shutdown = createShutdownHandler(state, client, config, () => {
     debounce.cancel();
     stopFallbackPolling();
+    stopPendingSwitchCheckTimer();
     ws.disconnect();
     if (userWs) {
       userWs.disconnect();
@@ -404,6 +470,11 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<Mar
     const initialMidpoint = await getMidpoint(client, config.market.yesTokenId);
     log(`  Initial REST midpoint: ${initialMidpoint.toFixed(4)} (YES token: ${config.market.yesTokenId.slice(0, 10)}...)`);
     await executeRebalance(initialMidpoint, "initial REST");
+    
+    // Start periodic pending switch check if orchestrator integration is enabled
+    if (onCheckPendingSwitch) {
+      startPendingSwitchCheckTimer();
+    }
 
   } catch (error) {
     log(`WebSocket connection failed, falling back to polling: ${error}`);
@@ -430,6 +501,7 @@ export async function runWithWebSocket(ctx: WebSocketRunnerContext): Promise<Mar
   return {
     reason: exitReason,
     finalPosition,
+    positionTracker: positionTracker ?? undefined,
     error: exitError,
     stats: state.stats,
   };

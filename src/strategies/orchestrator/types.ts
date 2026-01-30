@@ -7,6 +7,7 @@
 
 import type { RankedMarketByEarnings } from "@/types/rewards.js";
 import type { MarketMakerConfig, SessionStats } from "../marketMaker/types.js";
+import type { PositionTracker } from "@/utils/positionTracker.js";
 
 /**
  * State machine phases for the orchestrator.
@@ -18,6 +19,58 @@ export type OrchestratorPhase =
   | "evaluating"    // Re-evaluating markets after neutral
   | "switching"     // Switching to new market
   | "shutdown";     // Graceful shutdown in progress
+
+/**
+ * Liquidation stages (progressive urgency for exiting positions).
+ * 
+ * When a market hits position limits, it enters liquidation mode.
+ * The orchestrator progressively increases urgency to close the position.
+ */
+export enum LiquidationStage {
+  /** Wait at midpoint - patient exit, no urgency */
+  PASSIVE = "passive",
+  
+  /** Gradually tighten spread - medium urgency (after N minutes) */
+  SKEWED = "skewed",
+  
+  /** Cross spread partially - high urgency (timeout triggered) */
+  AGGRESSIVE = "aggressive",
+  
+  /** Force exit at any price - critical (stop-loss triggered) */
+  MARKET = "market",
+}
+
+/**
+ * Represents a market in liquidation mode.
+ * 
+ * Liquidation markets have non-neutral positions (hit position limits)
+ * and are being passively exited while a new market runs actively.
+ */
+export interface LiquidationMarket {
+  /** The market being liquidated */
+  market: RankedMarketByEarnings;
+  
+  /** Market maker config (for market params like tokenIds, negRisk) */
+  config: MarketMakerConfig;
+  
+  /** Position tracker for this market (tracks YES/NO balances, P&L) */
+  tracker: PositionTracker;
+  
+  /** When liquidation started */
+  startedAt: Date;
+  
+  /** Current liquidation stage */
+  stage: LiquidationStage;
+  
+  /** Currently active order ID (if any) */
+  activeOrderId: string | null;
+  
+  /** Last quoted price used for liquidation */
+  lastMidpoint: number | null;
+  
+  /** Maximum price we can buy at without incurring a loss (break-even ceiling) */
+  maxBuyPrice: number | null;
+}
 
 /**
  * Pending market switch detected by periodic re-evaluation.
@@ -53,6 +106,13 @@ export interface OrchestratorState {
    * Switch executes when position becomes neutral.
    */
   pendingSwitch: PendingSwitch | null;
+
+  /**
+   * Markets currently in liquidation mode.
+   * These have non-neutral positions and passive exit orders.
+   * The orchestrator manages these in the background while running the active market.
+   */
+  liquidationMarkets: LiquidationMarket[];
 
   /** Number of market switches this session */
   switchCount: number;

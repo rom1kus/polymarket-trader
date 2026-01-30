@@ -17,7 +17,11 @@ polymarket-trader/
 ├── docs/
 │   └── strategies/
 │       ├── market-maker.md         # Market maker strategy documentation
-│       └── market-maker-roadmap.md # Market maker future enhancements
+│       ├── market-maker-roadmap.md # Market maker future enhancements
+│       └── orchestrator.md         # Orchestrator documentation (auto market selection)
+├── data/                 # Trading history data (auto-generated)
+│   ├── fills-*.json      # Position tracking and fill history per market
+│   └── liquidations.json # Markets currently in liquidation mode (orchestrator)
 ├── src/
 │   ├── config/           # Application configuration
 │   │   ├── index.ts      # CLOB and Gamma API hosts, chain settings
@@ -48,22 +52,27 @@ polymarket-trader/
 │   │   ├── positions.ts  # Position tracking types
 │   │   ├── rewards.ts    # Types for reward eligibility checking
 │   │   └── strategy.ts   # Shared strategy types (MarketParams, etc.)
-│   └── utils/            # Shared utility modules
-│       ├── authClient.ts # Authenticated ClobClient factory (for trading)
-│       ├── balance.ts    # USDC and token balance utilities
-│       ├── client.ts     # Read-only ClobClient factory
-│       ├── ctf.ts        # Conditional Token Framework operations (split/merge/approve via Safe)
-│       ├── safe.ts       # Safe (Gnosis Safe) SDK utilities for transaction execution
-│       ├── env.ts        # Environment variable management
-│       ├── formatters.ts # Output formatting utilities
-│       ├── gamma.ts      # Gamma API utilities (fetch events, parse markets)
-│       ├── helpers.ts    # Common utilities (sleep, logging)
-│       ├── inventory.ts  # Inventory management (status, requirements, pre-flight)
-│       ├── markets.ts    # Market data utilities (sorting, outcome helpers)
-│       ├── orderbook.ts  # Order book fetching utilities
-│       ├── orders.ts     # Order placement and management utilities
-│       ├── positions.ts  # Position tracking utilities
-│       └── rewards.ts    # Reward calculation and eligibility checking
+│   ├── utils/            # Shared utility modules
+│   │   ├── authClient.ts # Authenticated ClobClient factory (for trading)
+│   │   ├── balance.ts    # USDC and token balance utilities
+│   │   ├── client.ts     # Read-only ClobClient factory
+│   │   ├── ctf.ts        # Conditional Token Framework operations (split/merge/approve via Safe)
+│   │   ├── safe.ts       # Safe (Gnosis Safe) SDK utilities for transaction execution
+│   │   ├── env.ts        # Environment variable management
+│   │   ├── formatters.ts # Output formatting utilities
+│   │   ├── gamma.ts      # Gamma API utilities (fetch events, parse markets)
+│   │   ├── helpers.ts    # Common utilities (sleep, logging)
+│   │   ├── inventory.ts  # Inventory management (status, requirements, pre-flight)
+│   │   ├── markets.ts    # Market data utilities (sorting, outcome helpers)
+│   │   ├── orderbook.ts  # Order book fetching utilities
+│   │   ├── orders.ts     # Order placement and management utilities
+│   │   ├── positions.ts  # Position tracking utilities
+│   │   └── rewards.ts    # Reward calculation and eligibility checking
+│   └── visualization/    # Trading data visualization dashboard
+│       ├── index.html        # Main dashboard HTML (single-page app)
+│       ├── app.js            # Chart.js visualization logic
+│       ├── updateManifest.js # Auto-generates manifest from data/*.json
+│       └── manifest.json     # Generated index of trading sessions
 ├── .env                  # Environment variables (not committed)
 ├── .env.example          # Example environment template
 ├── package.json          # Project configuration
@@ -96,6 +105,10 @@ Custom types for Polymarket CLOB API responses not exported by `@polymarket/clob
 - `Market` - Market data structure from CLOB API
 - `MarketsResponse` - Paginated markets response (extends `PaginationPayload`)
 - `OrderBookData` - Order book pricing data combining CLOB and Gamma prices
+- `PriceSnapshot` - Price snapshot at a point in time (from `/prices-history` endpoint)
+- `PriceHistoryResponse` - Response from CLOB price history endpoint
+- `VolatilityMetrics` - Calculated volatility metrics (price change %, max move, etc.)
+- `VolatilityThresholds` - Configuration for volatility filtering (max change %, lookback window)
 
 #### `src/types/gamma.ts`
 Types for Polymarket Gamma API responses (event and market metadata):
@@ -277,7 +290,12 @@ Gamma API utilities for fetching event and market metadata:
   - Uses cursor-based pagination (`nextCursor`) to fetch all markets from API
   - Applies early filtering (liquidity compatibility, minSize) during fetch to reduce memory usage
   - Supports `onProgress` callback for progress reporting
-  - **NegRisk handling:** Reads `neg_risk` field from rewards API response (defaults to `false` if not present)
+  - **NegRisk handling:** Reads `neg_risk` field from rewards API (note: may be stale/incorrect)
+- `enrichMarketNegRisk(market, fetcher?)` - **CRITICAL:** Fetches correct `negRisk` value from Gamma API
+  - The Rewards API has incorrect/stale `negRisk` data
+  - Gamma API is the authoritative source for `negRisk` (affects signature generation)
+  - Called automatically by `findBestMarket()` before returning selected market
+  - Must be called before creating orders for any market from Rewards API
 - `fetchMarketRewardsInfo(conditionIds, fetcher?)` - Fetches market competitiveness and rate_per_day
 
 #### `src/utils/markets.ts`
@@ -338,15 +356,54 @@ Common helper utilities:
 
 - `formatDuration(ms)` - Formats duration in milliseconds to human-readable (e.g., "2h 30m 15s")
 
+#### `src/utils/volatility.ts`
+Market volatility detection utilities for filtering out dangerous markets:
+- `fetchPriceHistory(tokenId, interval, fetcher?)` - Fetches historical price data from CLOB API
+- `calculatePriceVolatility(priceHistory, windowMinutes)` - Calculates volatility metrics (% change, max move)
+- `isMarketSafe(tokenId, thresholds, fetcher?)` - Determines if market passes volatility check
+- `checkMarketVolatility(tokenId, marketName, thresholds, fetcher?)` - With detailed logging
+
+**Purpose:** Prevents adverse selection by filtering out markets with excessive price movement (default: >10% in 60 minutes, conservative setting).
+
+**Implementation Status:** ✅ **COMPLETED (2026-01-21)** - Integrated into market discovery and orchestrator
+
+**How it works:**
+1. Fetches 1 hour of price history from CLOB `/prices-history` endpoint (public, no auth required)
+2. Analyzes recent window (default: 60 minutes, configurable)
+3. Filters out markets exceeding threshold (default: 10% change, conservative)
+4. Conservative approach: skips market on API failure
+5. Optimized top-first checking: only checks ranked candidates, not all markets
+
+**Used by:** Market discovery (`findBestMarket`) and orchestrator to proactively filter volatile markets before entering
+
+**Configuration:** See `volatilityFilter` in orchestrator config. CLI flags: `--max-volatility`, `--volatility-lookback`, `--no-volatility-filter`
+
+**Real-world validation:** Would have prevented -$22.70 loss from 2026-01-21 session (31% market move in 4 minutes)
+
 #### `src/utils/marketDiscovery.ts`
 Market discovery utilities for finding and ranking markets by earning potential:
 - `discoverMarkets(options?)` - Main discovery function, fetches and ranks markets
-- `findBestMarket(liquidity, options?)` - Convenience function to get single best market
+- `findBestMarket(liquidity, options?)` - Finds single best market with optimized volatility checking
 - `rankMarketsByEarnings(markets, liquidity)` - Ranks markets by estimated daily earnings
 - `fetchRealCompetition(markets, options?)` - Fetches real Q scores from orderbooks
 - `getFirstTokenId(market)` - Extracts first token ID from clobTokenIds field
 
-**NegRisk Market Filtering:** NegRisk markets (multi-outcome markets) are automatically filtered out during ranking due to signature compatibility issues with the current implementation. This requires testing and fixing to support NegRisk markets.
+**Volatility Filtering Integration:** When `volatilityThresholds` is provided to `findBestMarket()`, it uses an optimized approach that checks volatility only on top-ranked candidates (not all markets upfront). This is more efficient than bulk filtering and ensures the best safe market is found quickly.
+
+**NegRisk Market Support:** NegRisk markets (multi-outcome markets) are fully supported as of 2026-01-26. The system correctly:
+- Reads the `negRisk` flag from the Gamma API (`neg_risk` field)
+- Passes the correct `negRisk` value when placing orders (required for proper EIP-712 signature creation)
+- Allows filtering NegRisk markets via `--exclude-negrisk` flag (disabled by default)
+
+**How NegRisk Affects Signatures:** The `negRisk` parameter determines which exchange contract is used in the EIP-712 signature domain:
+- `negRisk: false` → Standard exchange (`0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E`)
+- `negRisk: true` → NegRisk exchange (`0xC5d563A36AE78145C45a50134d48A1215220f80a`)
+
+Using the wrong value causes "invalid signature" errors from the CLOB API.
+
+**CTF Operations (Split/Merge) on NegRisk:** The current CTF utilities (`splitPositionFromSafe`, `mergePositionsFromSafe`) use the standard CTF contract and may not work correctly with NegRisk markets. NegRisk markets may require using the NEG_RISK_ADAPTER contract (`0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296`). This needs further testing and implementation.
+
+**NegRisk Filtering:** Can optionally filter out NegRisk markets by passing `excludeNegRisk: true` to `rankMarketsByEarnings()` or `findBestMarket()`. By default (false), NegRisk markets are allowed and handled correctly.
 
 **Used by:** `findBestMarkets.ts` script and orchestrator
 
@@ -438,6 +495,28 @@ Order ID tracking for correct fill attribution:
 **Purpose:** When placing orders, we track which token (YES/NO) and side (BUY/SELL) each order was placed for.
 This is **essential** for correct fill attribution - we use the tracked `side` to know what we actually
 did (bought or sold), rather than incorrectly inferring from the taker's perspective.
+
+#### `src/utils/orchestratorState.ts`
+Orchestrator state management for detecting existing positions on restart:
+- `DetectedPosition` - Interface for detected market positions (conditionId, balances, net exposure)
+- `detectExistingPositions(client)` - Scans all markets for non-neutral positions
+- `findPriorityMarket(positions)` - Finds market with largest exposure (most urgent to resume)
+- `formatDetectedPosition(position)` - Formats position for display
+- `printPositionsSummary(positions)` - Prints summary of all detected positions
+
+**Purpose:** Prevents capital fragmentation on orchestrator restart. When restarting, the orchestrator
+scans for existing non-neutral positions and handles them appropriately:
+- Positions already marked in `./data/liquidations.json` are automatically restored to the liquidation queue
+- Other non-neutral positions are queued for liquidation (prompted in supervised mode, automatic with `--auto-resume`)
+This ensures you don't accidentally start trading a new market while stuck with positions in others.
+
+**Detection Process:**
+1. Scans all `./data/fills-*.json` files for known markets
+2. Verifies on-chain balances for ground truth
+3. Separates liquidation vs active positions using `./data/liquidations.json`
+4. Restores liquidations automatically; prompts or auto-queues other positions for liquidation
+
+**Dust Threshold:** Balances below 0.1 tokens are considered negligible and ignored.
 
 #### `src/utils/storage.ts`
 JSON file persistence for position tracking data:
@@ -569,27 +648,45 @@ Directory for automated trading strategies. Each strategy should:
 #### `src/strategies/orchestrator/`
 Automatic market selection and switching orchestrator.
 
+> **Full documentation:** [docs/strategies/orchestrator.md](docs/strategies/orchestrator.md)
+
 **Purpose:** Automatically maximizes liquidity rewards by:
-1. Finding the best market based on earning potential
-2. Running the market maker continuously
-3. Periodically re-evaluating markets (every N minutes)
-4. When a better market is found, setting a "pending switch"
-5. When position becomes neutral AND pending switch exists, executing the switch
+1. Detecting existing positions on startup to prevent capital fragmentation
+2. Finding the best market based on earning potential
+3. Running the market maker continuously
+4. Periodically re-evaluating markets (every N minutes)
+5. When a better market is found, setting a "pending switch"
+6. When position becomes neutral AND pending switch exists, executing the switch
 
 **Files:**
-- `index.ts` - Main orchestrator loop and CLI entry point
+- `index.ts` - Main orchestrator loop, CLI entry point, position resume logic, dual-market operation
 - `config.ts` - Orchestrator configuration (`OrchestratorConfig`, defaults, CLI parsing)
-- `types.ts` - Orchestrator types (`OrchestratorState`, `PendingSwitch`, `SwitchDecision`, events)
+- `types.ts` - Orchestrator types (`OrchestratorState`, `PendingSwitch`, `SwitchDecision`, `LiquidationMarket`, events)
+- `liquidation.ts` - Liquidation management for passive position exit
 
 **Key Features:**
 - Uses `findBestMarket()` from `@/utils/marketDiscovery.ts`
 - Uses `generateMarketConfig()` from `@/utils/marketConfigGenerator.ts`
+- Uses `detectExistingPositions()` from `@/utils/orchestratorState.ts` for restart protection
+- **Restart protection**: On startup, scans for existing non-neutral positions and prompts to resume
+  - Supervised mode (default): Manual confirmation required to resume
+  - 24/7 mode (`--auto-resume`): Automatically resumes without prompt
+  - Prevents capital fragmentation across multiple markets
+- **Volatility filtering**: Filters out markets with excessive price movement (>10% in 60 min by default, conservative) to prevent adverse selection
+  - Uses optimized top-first checking (only checks top-ranked candidates, not all markets)
+  - Configurable via `--max-volatility` and `--volatility-lookback` flags
+  - Can be disabled with `--no-volatility-filter`
 - **Actual earnings comparison**: Uses `calculateActualEarnings()` to compare real performance vs estimated potential
 - **Periodic re-evaluation** with configurable interval (default 5 minutes)
 - **Pending switch pattern**: Better market sets flag, switch executes when neutral
 - Configurable switching threshold (default 20% improvement required)
 - Log-only mode for safe testing (default: no real switching)
 - Session summary with cumulative stats on shutdown
+- **Phase 4 - Dual-Market Operation** (NEW): Simultaneous active market making + passive liquidation
+  - Position limit detection triggers liquidation handoff
+  - Active market continues full market making
+  - Liquidation markets passively exit positions in parallel
+  - Markets in liquidation are excluded from best market selection
 
 **Switching Logic:**
 - Uses **actual earnings** from placed orders when available (not just estimates)
@@ -599,14 +696,125 @@ Automatic market selection and switching orchestrator.
 - Finding a better market TRIGGERS the pending switch flag
 - Switch executes only when BOTH: pending switch exists AND position is neutral
 
+**Phase 4: Dual-Market Operation (Position Limit Handling):**
+
+**Position Limit Trigger:** The market maker exits to liquidation mode when ANY side is blocked by position limits AND the position is non-neutral (abs(net exposure) > 0.1). This ensures immediate handoff to liquidation rather than waiting for both sides to be blocked.
+
+When the active market hits position limits, the orchestrator:
+
+1. **Moves market to liquidation queue:**
+   - Creates `LiquidationMarket` with position tracker and config
+   - Starts in PASSIVE stage (quote at midpoint to exit)
+   - Stores active order ID and last midpoint for reference
+
+2. **Finds new active market:**
+   - Excludes markets currently in liquidation (`excludeConditionIds`)
+   - Ranks remaining markets by earning potential
+   - Switches to new best market immediately
+
+3. **Manages liquidations in parallel:**
+   - Every 30 seconds, checks all liquidation markets
+   - Places passive exit orders using in-memory `PositionTracker` state (no per-cycle on-chain balance reconciliation)
+   - Removes markets when position becomes neutral (< 0.1 exposure based on tracker)
+
+- **Liquidation Stages (MVP: PASSIVE only):**
+- `PASSIVE` - Profit-protected liquidation using SELL orders with avg-cost floor (current implementation)
+  - **Sell-to-close approach:** If long YES, SELL YES tokens; if long NO, SELL NO tokens
+  - **Target price calculation:** Desired price is midpoint (for YES) or (1 - midpoint) (for NO)
+  - **Profit protection floor:** Target price is floored at average cost: `targetPrice = max(desiredPrice, avgCost)`
+  - This prevents locking in losses by never selling below cost basis
+  - When market price is unfavorable (below cost), places opportunistic order AT cost (captures fills if market recovers)
+  - When market price is favorable (at/above cost), places order at midpoint for quick exit
+  - Order replacement threshold: 0.5 cents price change triggers cancel/replace
+  - Note: `calculateMaxBuyPrice()` exists (computes break-even ceiling for hypothetical buy-to-close) but is not currently used by liquidation quoting logic
+- `SKEWED` - Quote slightly above/below midpoint to incentivize fills (future)
+- `AGGRESSIVE` - Larger price concessions (future)
+- `MARKET` - Immediate exit at any price (future)
+
+**Architecture:**
+```
+Active Market (Market A)
+  ├─ Full market making with position limits
+  └─ On position_limit → move to liquidation queue
+
+Liquidation Queue (Markets B, C, D...)
+  ├─ Market B: PASSIVE liquidation (quote at midpoint)
+  ├─ Market C: PASSIVE liquidation (quote at midpoint)
+  └─ (Removed when position becomes neutral)
+
+New Active Market (Market E)
+  └─ Full market making continues
+```
+
+**Key Design Decisions:**
+- **Persisted state handoff:** `PositionTracker` is passed directly (not recreated) for seamless transition
+- **No WebSocket for liquidation:** Relies on in-memory tracker state and periodic management (no per-cycle on-chain balance reconciliation)
+- **Entire position size:** Liquidation orders close full position at once (not gradual)
+- **Neutral threshold:** < 0.1 shares considered neutral (completes liquidation)
+- **30-second interval:** Balance of responsiveness vs API rate limits (liquidation timer only runs when `--enable-switching` is set)
+- **Profit protection:** Uses `PositionTracker` average cost to set price floor
+  - Never sells below cost basis (prevents locking in losses)
+  - When price unfavorable: Places opportunistic orders at cost basis
+  - When price favorable: Places orders at midpoint for quick exit
+  - Always has an order on the book to capture favorable price movements
+
+**Pending Switch Detection:**
+The orchestrator checks for pending switch at multiple checkpoints to ensure timely execution:
+1. **After each fill** - When trades occur and position changes
+2. **After merge operations** - When neutral tokens are merged to USDC
+3. **After each rebalance** - At the end of every rebalance cycle
+4. **Periodic timer** - Every 10 seconds, independent of activity
+
+This multi-checkpoint approach ensures the switch executes promptly when position becomes neutral,
+even in low-activity markets or when starting with a neutral position.
+
+**Shutdown Handling:**
+- The orchestrator does NOT register its own SIGINT/SIGTERM handlers
+- The market maker's shutdown handler (registered in websocket.ts) handles Ctrl+C
+- This ensures orders are properly cancelled on both YES and NO tokens when exiting
+- The orchestrator detects shutdown via `state.running = false` and exits gracefully
+
+**Market Switching:**
+When the orchestrator switches from one market to another:
+1. Market maker exits with reason "neutral"
+2. Orchestrator cancels all orders on the OLD market (both YES and NO tokens)
+3. Orchestrator updates state to the NEW market
+4. Market maker starts on the NEW market with fresh orders
+
+This ensures no orders are left behind on old markets during switches.
+
 **Usage:**
 ```bash
 npm run orchestrate                          # Dry run, log switching decisions
 npm run orchestrate -- --liquidity 200       # Custom liquidity amount
 npm run orchestrate -- --threshold 0.15      # 15% improvement threshold
 npm run orchestrate -- --re-evaluate-interval 10  # Check every 10 minutes
-npm run orchestrate -- --enable-switching    # Enable market switching (still dry run)
+npm run orchestrate -- --max-volatility 0.15      # 15% max price change threshold
+npm run orchestrate -- --volatility-lookback 60   # 60-minute lookback window (default)
+npm run orchestrate -- --no-volatility-filter     # Disable volatility filtering
+npm run orchestrate -- --exclude-negrisk          # Exclude NegRisk markets
+npm run orchestrate -- --check-positions-only     # Only check positions, don't start
+npm run orchestrate -- --auto-resume              # Enable auto-resume (24/7 mode)
+npm run orchestrate -- --enable-switching         # Enable market switching (still dry run)
 npm run orchestrate -- --enable-switching --no-dry-run  # Full live mode
+```
+
+**Flow Diagram:**
+```
+STARTUP → detect positions → prompt/auto-resume OR discover best market → MARKET_MAKING
+                                                                                │
+                                           ┌────────────────────┴────────────────────┐
+                                           │                                         │
+                                     [periodic timer]                           [fills occur]
+                                           │                                         │
+                                     re-evaluate markets                    check onCheckPendingSwitch
+                                           │                                         │
+                                     if better market:                     if pendingSwitch && neutral:
+                                     set pendingSwitch                            SWITCH
+                                           │                                         │
+                                           └────────────────────┬────────────────────┘
+                                                                │
+                                                         MARKET_MAKING (or new market)
 ```
 
 **Flow Diagram:**
@@ -686,6 +894,39 @@ Example shutdown summary:
 ============================================================
 ```
 
+### `src/visualization/`
+Web-based visualization dashboard for analyzing trading history.
+
+**Purpose:** Provides interactive charts and analytics for trading sessions stored in `data/fills-*.json`.
+
+**Features:**
+- **Automatic session discovery** - Scans `data/` directory and generates manifest
+- **Interactive charts** (powered by Chart.js via CDN):
+  - Price evolution timeline (YES/NO trade prices over time)
+  - Position building chart (cumulative YES/NO tokens + net exposure)
+  - Trade distribution histogram (volume by price level)
+  - P&L tracking (cumulative cost over time)
+- **Session statistics** - Trade count, volume, positions, average prices
+- **Sidebar navigation** - Quick switching between trading sessions
+- **Dark theme** - Optimized for comfortable viewing
+
+**Files:**
+- `index.html` - Single-page dashboard UI
+- `app.js` - Chart rendering and data processing logic
+- `updateManifest.js` - Node.js script to scan `data/` and generate manifest
+- `manifest.json` - Auto-generated index of available trading sessions
+
+**Usage:**
+```bash
+npm run visualize    # Generates manifest + serves on http://localhost:3000
+```
+
+**Technical Notes:**
+- Zero build process - vanilla HTML/JS with Chart.js from CDN
+- Uses `http-server` via `npx` (no installation required)
+- Manifest updates automatically on each launch
+- All data processing happens client-side (no backend needed)
+
 ## Environment Variables
 
 | Variable | Required | Description |
@@ -715,6 +956,9 @@ npm run findBestMarkets -- --details 1                # Show details for top mar
 npm run marketMaker                                   # Run market maker bot (configure first!)
 npm run orchestrate                                   # Run orchestrator (auto market selection)
 npm run orchestrate -- --help                         # Show orchestrator options
+
+# Visualization
+npm run visualize                                     # Launch trading data visualization dashboard
 ```
 
 ## APIs Used
@@ -791,5 +1035,52 @@ The Safe SDK (`@safe-global/protocol-kit`) handles:
 - All types defined in `src/types/`
 - All utilities in `src/utils/`
 
+## NegRisk Markets
+
+NegRisk markets are multi-outcome markets that require special handling:
+
+### Order Placement
+- **Critical**: Must pass `negRisk: true` when placing orders on NegRisk markets
+- The `negRisk` parameter determines which exchange contract is used for EIP-712 signatures
+- Using the wrong value causes "invalid signature" errors from the CLOB API
+
+### Detection and Data Enrichment
+- **IMPORTANT**: The Rewards API has **incorrect/stale** `negRisk` data
+- The Gamma API is the **authoritative source** for `negRisk` values
+- `enrichMarketNegRisk()` in `gamma.ts` fetches correct values from Gamma API
+- Market discovery automatically enriches the selected market before returning it
+- **DO NOT** place orders without enriching `negRisk` first - will cause signature errors
+
+### API Data Sources
+| API | Endpoint | negRisk Accuracy | Use Case |
+|-----|----------|------------------|----------|
+| Rewards API | `/api/rewards/markets` | ❌ Incorrect/stale | Market discovery, reward data |
+| Gamma API | `/gamma-api.polymarket.com/markets` | ✅ Authoritative | negRisk validation before trading |
+
+### Data Flow
+```
+1. fetchMarketsWithRewards() → Rewards API → negRisk may be wrong ❌
+2. findBestMarket() → enrichMarketNegRisk() → Gamma API → negRisk corrected ✅
+3. createConfigForMarket() → uses corrected negRisk ✅
+4. placeOrder() → signatures use correct exchange contract ✅
+```
+
+### Filtering
+- By default, NegRisk markets are **allowed** in market discovery
+- Use `--exclude-negrisk` flag to filter them out if needed
+- The orchestrator banner shows "NegRisk Markets: ALLOWED/EXCLUDED"
+- Selected market display shows "NegRisk: true/false"
+
+### CTF Operations
+- **Limitation**: Current split/merge operations may not work correctly on NegRisk markets
+- NegRisk markets may require using `NEG_RISK_ADAPTER` contract instead of standard CTF
+- Trading (order placement) works correctly, but auto-merge might fail
+- This requires further testing and implementation
+
+### Contract Addresses
+- Standard Exchange: `0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E`
+- NegRisk Exchange: `0xC5d563A36AE78145C45a50134d48A1215220f80a`
+- NegRisk Adapter: `0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296`
+
 ---
-*Last updated: 2026-01-21 - Documented WebSocket token filtering, 0.1 dust threshold, and NegRisk market exclusion*
+*Last updated: 2026-01-26 - Fixed negRisk data enrichment from Gamma API*

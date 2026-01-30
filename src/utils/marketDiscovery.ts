@@ -27,6 +27,7 @@
 
 import {
   fetchMarketsWithRewards,
+  enrichMarketNegRisk,
   type FetchMarketsWithRewardsOptions,
 } from "@/utils/gamma.js";
 import type {
@@ -41,6 +42,9 @@ import {
   fetchBatchCompetition,
   type MarketForCompetition,
 } from "@/utils/orderbook.js";
+import { checkMarketVolatility } from "@/utils/volatility.js";
+import type { VolatilityThresholds } from "@/types/polymarket.js";
+import { log } from "@/utils/helpers.js";
 
 /**
  * Options for market discovery.
@@ -55,6 +59,12 @@ export interface MarketDiscoveryOptions {
   /** Maximum minSize requirement filter (default: no filter) */
   maxMinSize?: number;
 
+  /** Exclude NegRisk markets from selection (default: false) */
+  excludeNegRisk?: boolean;
+
+  /** Exclude markets by condition ID (e.g., markets in liquidation) */
+  excludeConditionIds?: string[];
+
   /** Progress callback for fetch phase */
   onFetchProgress?: (fetched: number, total: number, filtered: number) => void;
 
@@ -63,6 +73,23 @@ export interface MarketDiscoveryOptions {
 
   /** Skip competition calculation (use API values, may be stale) */
   skipCompetitionFetch?: boolean;
+}
+
+/**
+ * Extended options for findBestMarket with volatility filtering.
+ */
+export interface FindBestMarketOptions extends Omit<MarketDiscoveryOptions, "liquidity" | "limit"> {
+  /** Volatility filtering thresholds (undefined = skip filtering) */
+  volatilityThresholds?: VolatilityThresholds;
+
+  /** Progress callback for volatility filtering phase */
+  onVolatilityProgress?: (checked: number, total: number, filtered: number) => void;
+
+  /** Exclude NegRisk markets from selection (default: false) */
+  excludeNegRisk?: boolean;
+
+  /** Exclude markets by condition ID (e.g., markets in liquidation) */
+  excludeConditionIds?: string[];
 }
 
 /**
@@ -109,11 +136,15 @@ export function getFirstTokenId(market: MarketWithRewards): string | null {
  *
  * @param markets - Markets with reward parameters
  * @param liquidityAmount - Liquidity amount in USD
+ * @param excludeNegRisk - Whether to exclude NegRisk markets (default: false)
+ * @param excludeConditionIds - Condition IDs to exclude (e.g., markets in liquidation)
  * @returns Markets ranked by estimated daily earnings (highest first)
  */
 export function rankMarketsByEarnings(
   markets: MarketWithRewards[],
-  liquidityAmount: number
+  liquidityAmount: number,
+  excludeNegRisk: boolean = false,
+  excludeConditionIds: string[] = []
 ): RankedMarketByEarnings[] {
   return markets
     .map((market) => ({
@@ -131,7 +162,11 @@ export function rankMarketsByEarnings(
       (m) =>
         m.earningPotential.compatible &&
         m.earningPotential.estimatedDailyEarnings > 0 &&
-        !m.negRisk // Skip NegRisk markets due to signature compatibility issues
+        // Keep market if: (1) NegRisk allowed OR (2) market is not NegRisk
+        // This filters out NegRisk markets only when excludeNegRisk=true
+        (!excludeNegRisk || !m.negRisk) &&
+        // Exclude markets by condition ID (e.g., currently in liquidation)
+        !excludeConditionIds.includes(m.conditionId)
     )
     .sort(
       (a, b) =>
@@ -213,6 +248,9 @@ export async function fetchRealCompetition(
  * 2. Calculates real competition from orderbooks
  * 3. Ranks markets by estimated daily earnings
  *
+ * Note: Volatility filtering is handled by findBestMarket() using an
+ * optimized approach (checking top candidates only).
+ *
  * @param options - Discovery options
  * @returns Discovery result with ranked markets
  */
@@ -264,7 +302,9 @@ export async function discoverMarkets(
   // Rank by earnings
   let rankedMarkets = rankMarketsByEarnings(
     marketsWithRealCompetition,
-    liquidity
+    liquidity,
+    options.excludeNegRisk ?? false,
+    options.excludeConditionIds ?? []
   );
 
   // Apply limit if specified
@@ -283,8 +323,12 @@ export async function discoverMarkets(
 /**
  * Finds the single best market for a given liquidity amount.
  *
- * This is a convenience function for the orchestrator that returns
- * only the top-ranked market.
+ * Optimized version that checks volatility only on top candidates:
+ * 1. Fetches markets with rewards
+ * 2. Calculates competition and ranks by earnings
+ * 3. Iterates through top markets checking volatility until a safe one is found
+ *
+ * This is much faster than checking volatility on all markets upfront.
  *
  * @param liquidity - Liquidity amount in USD
  * @param options - Additional discovery options
@@ -300,15 +344,87 @@ export async function discoverMarkets(
  */
 export async function findBestMarket(
   liquidity: number,
-  options: Omit<MarketDiscoveryOptions, "liquidity" | "limit"> = {}
+  options: FindBestMarketOptions = {}
 ): Promise<RankedMarketByEarnings | null> {
+  // If no volatility filtering requested, use old approach
+  if (!options.volatilityThresholds) {
+    const result = await discoverMarkets({
+      ...options,
+      liquidity,
+      limit: 1,
+    });
+    const bestMarket = result.markets[0] ?? null;
+    
+    // CRITICAL: Enrich with correct negRisk from Gamma API
+    if (bestMarket) {
+      await enrichMarketNegRisk(bestMarket);
+    }
+    
+    return bestMarket;
+  }
+
+  // Optimized approach: rank first, then check volatility iteratively
+  log("[Discovery] Using optimized volatility checking (top-first)");
+
+  // Get all markets ranked by earnings WITHOUT volatility filtering
   const result = await discoverMarkets({
-    ...options,
+    maxMinSize: options.maxMinSize,
+    skipCompetitionFetch: options.skipCompetitionFetch,
+    onFetchProgress: options.onFetchProgress,
+    onCompetitionProgress: options.onCompetitionProgress,
+    excludeNegRisk: options.excludeNegRisk ?? false,
+    excludeConditionIds: options.excludeConditionIds ?? [],
     liquidity,
-    limit: 1,
   });
 
-  return result.markets[0] ?? null;
+  if (result.markets.length === 0) {
+    return null;
+  }
+
+  log(`[Discovery] Ranked ${result.markets.length} markets by earnings, checking volatility on top candidates...`);
+
+  // Iterate through ranked markets, checking volatility one at a time
+  let checked = 0;
+  let filtered = 0;
+
+  for (const market of result.markets) {
+    const tokenId = getFirstTokenId(market);
+    if (!tokenId) {
+      checked++;
+      filtered++;
+      if (options.onVolatilityProgress) {
+        options.onVolatilityProgress(checked, result.markets.length, filtered);
+      }
+      continue;
+    }
+
+    // Check this specific market's volatility
+    const isSafe = await checkMarketVolatility(
+      tokenId,
+      market.question,
+      options.volatilityThresholds
+    );
+
+    checked++;
+    if (options.onVolatilityProgress) {
+      options.onVolatilityProgress(checked, result.markets.length, filtered);
+    }
+
+    if (isSafe) {
+      log(`[Discovery] Found safe market after checking ${checked} candidates (${filtered} filtered)`);
+      
+      // CRITICAL: Enrich with correct negRisk from Gamma API
+      // The Rewards API has incorrect/stale negRisk data, which causes signature errors
+      await enrichMarketNegRisk(market);
+      
+      return market;
+    }
+
+    filtered++;
+  }
+
+  log(`[Discovery] No safe markets found after checking all ${checked} candidates`);
+  return null;
 }
 
 /**

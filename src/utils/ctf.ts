@@ -211,11 +211,16 @@ export async function ensureUsdcApprovalFromSafe(
  * Splits USDC into YES and NO tokens from the Safe account.
  *
  * This converts `amount` USDC into `amount` YES tokens AND `amount` NO tokens.
- * The total value is preserved: YES + NO = 1 USDC per pair.
+ * Requires prior USDC approval for the CTF contract.
+ *
+ * TODO: NegRisk markets may require using the NEG_RISK_ADAPTER contract
+ * (0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296) instead of the standard CTF.
+ * This needs testing and verification with actual NegRisk markets.
+ * For now, this function only supports standard binary markets.
  *
  * @param safe - Initialized Safe instance
  * @param conditionId - The market's condition ID
- * @param amount - Amount of USDC to split (creates equal YES + NO)
+ * @param amount - Amount of USDC to split
  * @returns Operation result with transaction hash or error
  *
  * @example
@@ -260,6 +265,11 @@ export async function splitPositionFromSafe(
  *
  * This converts `amount` YES tokens AND `amount` NO tokens into `amount` USDC.
  * You must have equal amounts of both tokens to merge.
+ *
+ * TODO: NegRisk markets may require using the NEG_RISK_ADAPTER contract
+ * (0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296) instead of the standard CTF.
+ * This needs testing and verification with actual NegRisk markets.
+ * For now, this function only supports standard binary markets.
  *
  * @param safe - Initialized Safe instance
  * @param conditionId - The market's condition ID

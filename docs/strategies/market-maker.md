@@ -395,8 +395,11 @@ The bot tracks positions and enforces net exposure limits:
 **How it works:**
 - Net exposure = YES tokens - NO tokens
 - Positive = long YES, Negative = long NO
-- Blocks BUY YES when exposure >= maxNetExposure
-- Blocks BUY NO when exposure <= -maxNetExposure
+- When position limits are hit AND position is non-neutral (>0.1 exposure):
+  - Market maker **exits entirely** with reason `position_limit`
+  - Intended for orchestrator handoff to liquidation management
+  - In standalone mode, bot stops and requires manual intervention
+- Position is considered neutral when net exposure is ≤ 0.1 shares
 
 **Initial Position & Cost Basis:**
 When starting with pre-existing tokens (YES or NO), the bot needs your cost basis for accurate P&L tracking. The bot uses a **0.1 token threshold** - only positions with 0.1 or more tokens trigger the cost basis prompt. Balances below 0.1 (dust balances) are ignored to avoid prompting for negligible pre-existing positions.

@@ -1,0 +1,22 @@
+{
+  "generated": 1769437922751,
+  "count": 2,
+  "files": [
+    {
+      "filename": "fills-2b84316a2019d17e.json",
+      "conditionId": "0x2b84316a2019d17e37153ebbcfd6a8a4ccf8ab5db10635c0f176ead6ed4f4368",
+      "tradeCount": 0,
+      "lastUpdated": 1769437867490,
+      "fileSize": 679,
+      "modified": 1769437867490.7764
+    },
+    {
+      "filename": "fills-b6f26187d7459a50.json",
+      "conditionId": "0xb6f26187d7459a50e69881a10ec6b08c4c0ec028ad026de8318378959aed6b50",
+      "tradeCount": 0,
+      "lastUpdated": 1769437496088,
+      "fileSize": 679,
+      "modified": 1769437496088.825
+    }
+  ]
+}

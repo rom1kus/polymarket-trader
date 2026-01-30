@@ -190,10 +190,11 @@ export interface MarketMakerState {
  * Used by the orchestrator to determine next action.
  */
 export type MarketMakerExitReason =
-  | "neutral"   // Position reached market-neutral state (netExposure === 0)
-  | "shutdown"  // User-initiated shutdown (SIGINT/SIGTERM)
-  | "error"     // Unrecoverable error
-  | "timeout";  // Timeout waiting for condition (future use)
+  | "neutral"        // Position reached market-neutral state (netExposure === 0)
+  | "position_limit" // Hit position limit (orchestrator should move to liquidation)
+  | "shutdown"       // User-initiated shutdown (SIGINT/SIGTERM)
+  | "error"          // Unrecoverable error
+  | "timeout";       // Timeout waiting for condition (future use)
 
 /**
  * Result returned when market maker exits.
@@ -213,6 +214,13 @@ export interface MarketMakerResult {
     netExposure: number;
     neutralPosition: number;
   };
+
+  /**
+   * Position tracker instance (for liquidation handoff).
+   * When reason === "position_limit", the orchestrator needs the tracker
+   * to continue managing the position in liquidation mode.
+   */
+  positionTracker?: any; // Type is PositionTracker but avoiding circular import
 
   /** Error details (if reason === "error") */
   error?: Error;

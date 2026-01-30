@@ -11,6 +11,7 @@ import {
   DEFAULT_WEBSOCKET_PARAMS,
   DEFAULT_POSITION_LIMITS,
 } from "../marketMaker/config.js";
+import type { VolatilityThresholds } from "../../types/polymarket.js";
 
 /**
  * Orchestrator configuration options.
@@ -43,6 +44,32 @@ export interface OrchestratorConfig {
    * @default 300000 (5 minutes)
    */
   reEvaluateIntervalMs: number;
+
+  /**
+   * Volatility filtering configuration.
+   * If enabled, markets with excessive price movement are filtered out
+   * during discovery to prevent adverse selection.
+   * Set to undefined to disable volatility filtering.
+   * 
+   * Default: Conservative settings (10% max change over 1 hour)
+   * - Prevents entering markets like the Zelenskyy WEF incident (31% move)
+   * - Can be relaxed with --max-volatility flag if needed
+   * 
+   * @default { maxPriceChangePercent: 0.10, lookbackMinutes: 60 }
+   */
+  volatilityFilter?: VolatilityThresholds;
+
+  /**
+   * Exclude NegRisk markets from market selection.
+   * NegRisk markets are multi-outcome markets that use a different exchange contract.
+   * They require special signature handling (negRisk: true in order placement).
+   * 
+   * When false (default), NegRisk markets are allowed and handled correctly.
+   * When true, NegRisk markets are filtered out during discovery.
+   * 
+   * @default false (NegRisk markets allowed)
+   */
+  excludeNegRisk: boolean;
 
   // =========================================================================
   // Market Maker Settings (passed to each market maker instance)
@@ -96,6 +123,40 @@ export interface OrchestratorConfig {
    */
   dryRun: boolean;
 
+  // =========================================================================
+  // Position Handling (Restart Protection)
+  // =========================================================================
+
+  /**
+   * Automatically liquidate detected non-liquidation positions without prompting.
+   * 
+   * On startup, if the orchestrator detects positions that are NOT already in
+   * liquidations.json, it will:
+   * - When false (default): Prompt user to choose liquidate/ignore for each position
+   * - When true: Automatically queue all detected positions for liquidation
+   * 
+   * After handling positions, the orchestrator discovers and starts a new active market.
+   * 
+   * Set to true for fully automated 24/7 operation.
+   * @default false
+   */
+  autoResume: boolean;
+
+  /**
+   * Ignore existing positions and force new market discovery on startup.
+   * DANGEROUS: May fragment capital across multiple markets.
+   * Requires manual confirmation via prompt.
+   * @default false
+   */
+  ignorePositions: boolean;
+
+  /**
+   * Only check for positions and report, don't start orchestrator.
+   * Useful for diagnostics.
+   * @default false
+   */
+  checkPositionsOnly: boolean;
+
   /**
    * Event handler for orchestrator events (logging, monitoring).
    */
@@ -112,6 +173,16 @@ export const DEFAULT_ORCHESTRATOR_CONFIG: OrchestratorConfig = {
   minEarningsImprovement: 0.2, // 20% improvement required to switch
   reEvaluateIntervalMs: 5 * 60 * 1000, // 5 minutes
 
+  // Volatility filtering (enabled by default per FINDINGS.md recommendations)
+  // Conservative settings to prevent adverse selection
+  volatilityFilter: {
+    maxPriceChangePercent: 0.10, // 10% max price change (conservative)
+    lookbackMinutes: 60, // Over 1-hour window
+  },
+
+  // NegRisk markets (disabled by default - allow all markets)
+  excludeNegRisk: false,
+
   // Market maker settings
   orderSize: 20,
   spreadPercent: 0.5,
@@ -122,6 +193,11 @@ export const DEFAULT_ORCHESTRATOR_CONFIG: OrchestratorConfig = {
   // Features & safety (conservative defaults)
   enableSwitching: false, // Log only by default
   dryRun: true, // No real orders by default
+
+  // Position resume (conservative defaults)
+  autoResume: false, // Prompt user by default
+  ignorePositions: false, // Always check for positions
+  checkPositionsOnly: false, // Normal operation
 };
 
 /**
@@ -155,6 +231,10 @@ export function createOrchestratorConfig(
       ...DEFAULT_ORCHESTRATOR_CONFIG.merge,
       ...overrides?.merge,
     },
+    volatilityFilter:
+      overrides?.volatilityFilter !== undefined
+        ? overrides.volatilityFilter
+        : DEFAULT_ORCHESTRATOR_CONFIG.volatilityFilter,
   };
 }
 
@@ -167,14 +247,23 @@ export function createOrchestratorConfig(
  * - --re-evaluate-interval <minutes>: How often to check for better markets (default: 5)
  * - --order-size <number>: Order size in shares
  * - --spread <number>: Spread percent (0-1)
+ * - --max-volatility <number>: Max price change % threshold (e.g., 0.15 for 15%)
+ * - --volatility-lookback <minutes>: Volatility lookback window in minutes (default: 60)
+ * - --no-volatility-filter: Disable volatility filtering entirely
+ * - --exclude-negrisk: Exclude NegRisk markets from selection
  * - --enable-switching: Enable actual market switching
  * - --no-dry-run: Disable dry run (place real orders)
+ * - --auto-resume: Auto-liquidate detected positions without prompting (for 24/7 mode)
+ * - --ignore-positions: Force new market discovery even with open positions (dangerous)
+ * - --check-positions-only: Only check and report positions, don't start
  *
  * @param args - Command-line arguments (typically process.argv.slice(2))
  * @returns Partial config with parsed values
  */
 export function parseOrchestratorArgs(args: string[]): Partial<OrchestratorConfig> {
   const config: Partial<OrchestratorConfig> = {};
+  let volatilityConfig: Partial<VolatilityThresholds> = {};
+  let disableVolatilityFilter = false;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -217,6 +306,28 @@ export function parseOrchestratorArgs(args: string[]): Partial<OrchestratorConfi
         }
         break;
 
+      case "--max-volatility":
+        if (nextArg) {
+          volatilityConfig.maxPriceChangePercent = parseFloat(nextArg);
+          i++;
+        }
+        break;
+
+      case "--volatility-lookback":
+        if (nextArg) {
+          volatilityConfig.lookbackMinutes = parseFloat(nextArg);
+          i++;
+        }
+        break;
+
+      case "--no-volatility-filter":
+        disableVolatilityFilter = true;
+        break;
+
+      case "--exclude-negrisk":
+        config.excludeNegRisk = true;
+        break;
+
       case "--enable-switching":
         config.enableSwitching = true;
         break;
@@ -228,7 +339,36 @@ export function parseOrchestratorArgs(args: string[]): Partial<OrchestratorConfi
       case "--dry-run":
         config.dryRun = true;
         break;
+
+      case "--auto-resume":
+        config.autoResume = true;
+        break;
+
+      case "--ignore-positions":
+        config.ignorePositions = true;
+        break;
+
+      case "--check-positions-only":
+        config.checkPositionsOnly = true;
+        break;
     }
+  }
+
+  // Apply volatility config if specified
+  if (disableVolatilityFilter) {
+    config.volatilityFilter = undefined;
+  } else if (
+    volatilityConfig.maxPriceChangePercent !== undefined ||
+    volatilityConfig.lookbackMinutes !== undefined
+  ) {
+    config.volatilityFilter = {
+      maxPriceChangePercent:
+        volatilityConfig.maxPriceChangePercent ??
+        DEFAULT_ORCHESTRATOR_CONFIG.volatilityFilter!.maxPriceChangePercent,
+      lookbackMinutes:
+        volatilityConfig.lookbackMinutes ??
+        DEFAULT_ORCHESTRATOR_CONFIG.volatilityFilter!.lookbackMinutes,
+    };
   }
 
   return config;

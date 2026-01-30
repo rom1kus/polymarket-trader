@@ -28,4 +28,4 @@ export const USDC_DECIMALS = 6;
 export const MIN_MATIC_BALANCE = 0.1;
 
 /** Default public RPC URL for Polygon mainnet */
-export const DEFAULT_POLYGON_RPC = "https://polygon-rpc.com";
+export const DEFAULT_POLYGON_RPC = "https://polygon.drpc.org";
